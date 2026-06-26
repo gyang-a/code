@@ -21,7 +21,7 @@ NODE_LABELS = {
     "approval": "等待审批",
     "reject": "已处理拒绝操作",
     "observe": "已观察结果",
-    "validation_node": "已运行验证",
+    "validation_node": "已请求 Agent 决定验证方式",
     "review_diff_node": "已检查 diff",
     "final_summary": "已准备最终总结",
 }

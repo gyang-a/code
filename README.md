@@ -7,7 +7,7 @@
 - 固定工作区沙箱
 - 有上限的文件读取和搜索结果
 - 基于精确匹配的安全 `patch_file`
-- 结构化验证命令，而不是任意 shell
+- 受限 `run_shell`，由 Agent 自己选择搜索、查看、测试、构建或验证命令
 - 可见的 git status / diff
 - 类似 Claude Code 的 slash commands
 - Level 0-3 风险分级与人工审批
@@ -49,7 +49,7 @@ python -m code_agent.main .
 > 已生成任务计划
   工具调用: read_file(path='...')
   工具结果: ...
-> 已运行验证
+> 已请求 Agent 决定验证方式
 > 已准备最终总结
 ```
 
@@ -80,12 +80,13 @@ START
               -> observe
               -> approval -> observe
               -> reject -> observe
-          -> validation_node
+          -> validation_node -> agent_loop
           -> review_diff_node
           -> final_summary
 ```
 
 模型永远不会直接访问文件系统。它只能调用工具层暴露的函数，而工具内部负责路径、文件大小、命令和敏感文件策略。
+写入后的验证不由 Graph 硬编码选择命令；`validation_node` 只提醒 Agent 进入验证阶段，是否运行 `pytest`、`npm build`、`pnpm test`、`uv run pytest` 等命令由 Agent 通过受限 `run_shell` 自己决定。
 
 Slash commands 由 CLI 控制面优先处理，所以 `/help`、`/diff`、`/doctor` 这类命令不需要调用 LLM。
 
@@ -130,4 +131,4 @@ Level 2 操作使用 LangGraph interrupt：
 /diff
 ```
 
-其中 `你好` 和 `你是什么模型` 会由 AI router 判定为普通对话或一般问题，不进入代码工具链；`pyproject.toml` 修改请求会触发 Level 2 审批。Agent 运行过程中，CLI 会持续打印节点进度、工具调用、工具结果、验证结果和 diff 检查信息。
+其中 `你好` 和 `你是什么模型` 会由 AI router 判定为普通对话或一般问题，不进入代码工具链；`pyproject.toml` 修改请求会触发 Level 2 审批。Agent 运行过程中，CLI 会持续打印节点进度、工具调用、工具结果、验证决策和 diff 检查信息。

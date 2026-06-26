@@ -42,11 +42,6 @@ DEFAULT_COMMANDS = {
         argv=["python", "-m", "pytest"],
         description="使用 pytest 运行 Python 测试。",
     ),
-    "python_compile": CommandSpec(
-        name="python_compile",
-        argv=["python", "-m", "compileall", "-q", "."],
-        description="编译 Python 文件，用于语法验证。",
-    ),
     "npm_test": CommandSpec(
         name="npm_test",
         argv=["npm", "test"],
@@ -90,7 +85,6 @@ def available_commands(workspace: Workspace) -> dict[str, CommandSpec]:
     root = workspace.root
 
     if (root / "pyproject.toml").exists() or (root / "pytest.ini").exists():
-        commands["python_compile"] = DEFAULT_COMMANDS["python_compile"]
         commands["pytest"] = DEFAULT_COMMANDS["pytest"]
 
     if (root / "package.json").exists():
@@ -276,6 +270,8 @@ def run_argv(argv: list[str], cwd: Path, *, timeout: int) -> subprocess.Complete
         cwd=cwd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         shell=False,
     )

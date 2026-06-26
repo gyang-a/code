@@ -14,10 +14,12 @@ def _run_git(workspace: Workspace, args: list[str], timeout: int = 10) -> str:
         cwd=workspace.root,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         shell=False,
     )
-    output = result.stdout + result.stderr
+    output = result.stdout if result.returncode == 0 else result.stdout + result.stderr
     return truncate(output)
 
 

@@ -29,7 +29,7 @@ from code_agent.tools import (
     build_search_text_tool,
     build_write_file_tool,
 )
-from code_agent.tools.safety import available_commands, run_argv
+from code_agent.tools.safety import available_commands
 
 
 def build_tools(workspace: Workspace):
@@ -56,12 +56,15 @@ def _git_output(workspace: Workspace, args: list[str], timeout: int = 10) -> str
             cwd=workspace.root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             shell=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return f"ERROR: {exc}"
-    return truncate(result.stdout + result.stderr)
+    output = result.stdout if result.returncode == 0 else result.stdout + result.stderr
+    return truncate(output)
 
 
 def _recent_tool_messages(state: AgentState) -> list[ToolMessage]:
@@ -76,9 +79,25 @@ def _recent_tool_messages(state: AgentState) -> list[ToolMessage]:
     return list(reversed(recent))
 
 
-def _has_changes(workspace: Workspace) -> bool:
-    status = _git_output(workspace, ["status", "--short"])
-    return bool(status.strip()) and not status.startswith("ERROR:")
+def _should_validate(state: AgentState) -> bool:
+    return bool(state.get("did_write") or state.get("changed_files"))
+
+
+WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
+WRITE_COMMAND_PREFIXES = (
+    "npm install",
+    "npm i",
+    "pnpm add",
+    "pnpm install",
+    "yarn add",
+    "yarn install",
+    "pip install",
+    "python -m pip install",
+    "uv add",
+    "uv pip install",
+    "docker compose up",
+    "docker-compose up",
+)
 
 
 def build_graph(workspace_path: str, config: AgentConfig | None = None):
@@ -204,13 +223,16 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         last_message = state["messages"][-1]
         if getattr(last_message, "tool_calls", None):
             return "execute"
-        return "validation_node" if _has_changes(workspace) else "review_diff_node"
+        if _should_validate(state) and not state.get("validation_requested"):
+            return "validation_node"
+        return "review_diff_node"
 
     def tool_result_router(state: AgentState):
         approval_reasons: list[str] = []
         rejection_reasons: list[str] = []
         errors: list[str] = []
         changed_files = set(state.get("changed_files", []))
+        did_write = bool(state.get("did_write"))
         pending_approval = None
         tool_calls_by_id = _recent_tool_calls_by_id(state)
 
@@ -230,13 +252,28 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
                 rejection_reasons.append(first_line)
             elif first_line.startswith("ERROR:"):
                 errors.append(first_line)
-            if "Patched " in content or "Created " in content or "Wrote " in content:
+            tool_call = tool_calls_by_id.get(message.tool_call_id)
+            if _tool_call_is_write(tool_call):
+                did_write = True
+                path_arg = _path_arg_from_tool_call(tool_call)
+                if path_arg:
+                    changed_files.add(path_arg)
                 changed_files.update(_changed_files_from_git(workspace))
+            if tool_call and tool_call.get("name") in {"run_command", "run_shell"} and first_line.startswith("ALLOWED["):
+                args = dict(tool_call.get("args") or {})
+                update_test_command = str(args.get("command") or "")
+                if update_test_command:
+                    test_command = update_test_command
+                    test_result = content
 
         update = {
             "changed_files": sorted(changed_files),
+            "did_write": did_write,
             "tool_errors": [*state.get("tool_errors", []), *errors],
         }
+        if "test_command" in locals():
+            update["test_command"] = test_command
+            update["test_result"] = test_result
         if approval_reasons:
             update.update(
                 {
@@ -284,6 +321,13 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             }
 
         execution_result = _execute_approved_tool(tools_by_name, pending)
+        did_write = bool(state.get("did_write") or _pending_action_is_write(pending))
+        changed_files = set(state.get("changed_files", []))
+        if did_write:
+            path_arg = _path_arg_from_pending(pending)
+            if path_arg:
+                changed_files.add(path_arg)
+            changed_files.update(_changed_files_from_git(workspace))
         return {
             "messages": [
                 HumanMessage(
@@ -297,6 +341,8 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             "needs_approval": False,
             "approval_reason": None,
             "pending_approval": None,
+            "did_write": did_write,
+            "changed_files": sorted(changed_files),
         }
 
     def reject_node(state: AgentState):
@@ -322,32 +368,42 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             return "final_summary"
         last_message = state["messages"][-1]
         if last_message.type == "ai" and not getattr(last_message, "tool_calls", None):
-            return "validation_node" if _has_changes(workspace) else "review_diff_node"
+            if _should_validate(state) and not state.get("validation_requested"):
+                return "validation_node"
+            return "review_diff_node"
         return "agent_loop"
 
     def validation_node(state: AgentState):
-        if not _has_changes(workspace):
-            return {"test_result": "已跳过验证：未检测到工作区变更。"}
+        if not _should_validate(state):
+            return {"test_result": "已跳过验证：本轮没有修改文件。"}
 
         commands = available_commands(workspace)
-        preferred = ["python_compile", "pytest", "npm_build", "npm_test", "pnpm_build", "pnpm_test"]
-        selected = next((name for name in preferred if name in commands), None)
-        if selected is None:
-            return {"test_result": "已跳过验证：未检测到安全的验证命令。"}
-
-        spec = commands[selected]
-        try:
-            result = run_argv(spec.argv, workspace.root, timeout=120)
-            output = truncate(result.stdout + result.stderr)
-            test_result = f"$ {' '.join(spec.argv)}\nexit_code={result.returncode}\n{output}"
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            test_result = f"验证命令运行失败: {exc}"
-
-        return {"test_command": selected, "test_result": test_result}
+        command_lines = "\n".join(
+            f"- {name}: {' '.join(spec.argv)} ({spec.description})"
+            for name, spec in commands.items()
+        )
+        prompt = HumanMessage(
+            content=(
+                "本轮已经发生文件修改。现在请你自己判断是否需要验证。\n"
+                "如果需要验证，请调用 run_shell 工具运行最相关的一条安全命令；"
+                "如果不需要或没有合适命令，请直接说明跳过原因，不要调用工具。\n\n"
+                f"检测到的安全验证命令：\n{command_lines or '- 无'}"
+            )
+        )
+        return {
+            "messages": [prompt],
+            "validation_requested": True,
+        }
 
     def review_diff_node(state: AgentState):
+        if not _should_validate(state):
+            return {
+                "changed_files": [],
+                "last_diff": None,
+                "diff_summary": "本轮未修改文件。",
+            }
         diff = _git_output(workspace, ["diff", "--", "."], timeout=20)
-        changed_files = _changed_files_from_git(workspace)
+        changed_files = sorted(set(state.get("changed_files", [])) | set(_changed_files_from_git(workspace)))
         return {
             "changed_files": changed_files,
             "last_diff": diff or None,
@@ -357,6 +413,16 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
     def final_summary(state: AgentState):
         if state.get("final_answer"):
             return {}
+
+        if not _should_validate(state):
+            final_prompt = HumanMessage(
+                content=(
+                    "现在生成最终中文回复。请直接回答用户最初的问题，并基于已经读取到的文件和工具结果说明你的判断。\n"
+                    "本轮没有修改文件，不要套用代码变更总结模板，不要声称运行了验证。"
+                )
+            )
+            response = llm.invoke([*state["messages"], final_prompt])
+            return {"messages": [response], "final_answer": response.content}
 
         final_prompt = HumanMessage(
             content=(
@@ -431,7 +497,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             "final_summary": "final_summary",
         },
     )
-    graph.add_edge("validation_node", "review_diff_node")
+    graph.add_edge("validation_node", "agent_loop")
     graph.add_edge("review_diff_node", "final_summary")
     graph.add_edge("final_summary", END)
 
@@ -455,6 +521,46 @@ def _summarize_diff(changed_files: list[str], diff: str) -> str:
 
 def _first_line(content: str) -> str:
     return content.splitlines()[0] if content.splitlines() else ""
+
+
+def _tool_call_is_write(tool_call: dict | None) -> bool:
+    if not tool_call:
+        return False
+    tool_name = str(tool_call.get("name") or "")
+    if tool_name in WRITE_TOOL_NAMES:
+        return True
+    if tool_name not in {"run_command", "run_shell"}:
+        return False
+    args = dict(tool_call.get("args") or {})
+    command = " ".join(str(args.get("command") or "").lower().split())
+    return any(command.startswith(prefix) for prefix in WRITE_COMMAND_PREFIXES)
+
+
+def _path_arg_from_tool_call(tool_call: dict | None) -> str | None:
+    if not tool_call:
+        return None
+    args = dict(tool_call.get("args") or {})
+    value = args.get("path")
+    return str(value) if value else None
+
+
+def _path_arg_from_pending(pending: dict | None) -> str | None:
+    if not pending:
+        return None
+    args = dict(pending.get("args") or {})
+    value = args.get("path")
+    return str(value) if value else None
+
+
+def _pending_action_is_write(pending: dict | None) -> bool:
+    if not pending:
+        return False
+    return _tool_call_is_write(
+        {
+            "name": pending.get("tool"),
+            "args": dict(pending.get("args") or {}),
+        }
+    )
 
 
 def _classify_user_intent(llm, user_goal: str) -> str:

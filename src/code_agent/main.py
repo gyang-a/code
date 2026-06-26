@@ -52,9 +52,11 @@ def _initial_state(session: Session, user_input: str) -> dict:
         "iteration_count": 0,
         "max_iterations": DEFAULT_MAX_ITERATIONS,
         "changed_files": [],
+        "did_write": False,
         "last_diff": None,
         "test_command": None,
         "test_result": None,
+        "validation_requested": False,
         "needs_approval": False,
         "approval_reason": None,
         "pending_approval": None,
@@ -72,12 +74,15 @@ def _run_git_diff(workspace: str) -> str:
             cwd=workspace,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             shell=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return f"ERROR: {exc}"
-    return truncate(result.stdout + result.stderr)
+    output = result.stdout if result.returncode == 0 else result.stdout + result.stderr
+    return truncate(output)
 
 
 def _doctor(workspace: str) -> None:

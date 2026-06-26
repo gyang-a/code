@@ -13,8 +13,8 @@ APPROVAL_TOKEN = "approved"
 
 def build_run_command_tool(workspace: Workspace):
     @tool
-    def run_command(command: str, timeout_seconds: int = 60, approval_token: str | None = None) -> str:
-        """运行已允许的验证命令；Level 2 命令需要确认，Level 3 命令会被拒绝。"""
+    def run_shell(command: str, timeout_seconds: int = 60, approval_token: str | None = None) -> str:
+        """在工作区沙箱内运行受限 shell 命令；Level 2 命令需要确认，Level 3 命令会被拒绝。"""
         decision, argv = classify_command(command, workspace)
         if decision.risk.value == "level_3":
             return rejected(decision.risk, decision.reason)
@@ -38,4 +38,4 @@ def build_run_command_tool(workspace: Workspace):
             f"{output}"
         )
 
-    return run_command
+    return run_shell

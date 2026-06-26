@@ -48,6 +48,8 @@ def build_search_text_tool(workspace: Workspace):
                 rg_command,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=workspace.root,
                 timeout=10,
                 shell=False,

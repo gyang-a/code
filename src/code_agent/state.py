@@ -20,10 +20,12 @@ class AgentState(TypedDict):
     max_iterations: int
 
     changed_files: list[str]
+    did_write: bool
     last_diff: str | None
 
     test_command: str | None
     test_result: str | None
+    validation_requested: bool
 
     needs_approval: bool
     approval_reason: str | None

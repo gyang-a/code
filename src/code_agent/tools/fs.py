@@ -32,12 +32,15 @@ def _git_diff_for(workspace: Workspace, path: str) -> str:
             cwd=workspace.root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             shell=False,
         )
         if result.returncode not in (0, 1):
             return "\n\nDiff 记录: 当前目录不是 git 仓库，或 git diff 不可用。"
-        diff = truncate(result.stdout + result.stderr, 4000)
+        output = result.stdout if result.returncode == 0 else result.stdout + result.stderr
+        diff = truncate(output, 4000)
         if diff:
             return "\n\nDiff 记录:\n" + diff
         if resolved.exists():
