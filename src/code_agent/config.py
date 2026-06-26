@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 
@@ -43,7 +44,8 @@ SENSITIVE_SUFFIXES = (
 
 @dataclass(frozen=True)
 class AgentConfig:
-    model: str = DEFAULT_MODEL
+    model: str = field(default_factory=lambda: os.getenv("CODE_AGENT_MODEL", DEFAULT_MODEL))
+    api_key: str | None = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY"))
     max_iterations: int = DEFAULT_MAX_ITERATIONS
     file_read_limit: int = DEFAULT_FILE_READ_LIMIT
     tool_output_limit: int = DEFAULT_TOOL_OUTPUT_LIMIT

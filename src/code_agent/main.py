@@ -13,6 +13,7 @@ from langgraph.types import Command
 from rich.prompt import Prompt
 
 from code_agent.config import AgentConfig, DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL
+from code_agent.services.env import load_dotenv
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.safety import available_commands
@@ -26,6 +27,7 @@ app = typer.Typer(no_args_is_help=True)
 class Session:
     workspace: str
     model: str = DEFAULT_MODEL
+    env_file: str | None = None
     thread_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     interactions: int = 0
     tool_loops: int = 0
@@ -79,13 +81,17 @@ def _run_git_diff(workspace: str) -> str:
 
 
 def _doctor(workspace: str) -> None:
+    env_path = Path(workspace) / ".env"
     table_rows = [
         ("workspace", "ok" if Path(workspace).is_dir() else "missing"),
-        ("OPENAI_API_KEY", "set" if os.getenv("OPENAI_API_KEY") else "missing"),
+        (".env", "found" if env_path.exists() else "missing"),
+        ("DEEPSEEK_API_KEY", "set" if os.getenv("DEEPSEEK_API_KEY") else "missing"),
+        ("CODE_AGENT_MODEL", os.getenv("CODE_AGENT_MODEL") or "not set"),
         ("git", "found" if shutil.which("git") else "missing"),
         ("rg", "found" if shutil.which("rg") else "missing; Python fallback will be used"),
         ("langgraph", "found" if importlib.util.find_spec("langgraph") else "missing"),
-        ("langchain_openai", "found" if importlib.util.find_spec("langchain_openai") else "missing"),
+        ("langchain", "found" if importlib.util.find_spec("langchain") else "missing"),
+        ("langchain_deepseek", "found" if importlib.util.find_spec("langchain_deepseek") else "missing"),
     ]
     for name, status in table_rows:
         console.print(f"[bold]{name}[/bold]: {status}")
@@ -143,7 +149,7 @@ def _handle_slash(command: str, session: Session) -> bool:
 @app.command()
 def chat(
     workspace: str = typer.Argument(".", help="Workspace directory for the code agent."),
-    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="OpenAI chat model name."),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override the chat model name."),
 ) -> None:
     """Start an interactive workspace-safe code agent."""
     try:
@@ -152,8 +158,17 @@ def chat(
     except WorkspaceError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    session = Session(workspace=resolved_workspace, model=model)
+    env_path = Path(resolved_workspace) / ".env"
+    loaded_env = load_dotenv(env_path)
+    selected_model = model or os.getenv("CODE_AGENT_MODEL", DEFAULT_MODEL)
+    session = Session(
+        workspace=resolved_workspace,
+        model=selected_model,
+        env_file=str(env_path) if loaded_env else None,
+    )
     print_banner(session.workspace, session.model)
+    if loaded_env:
+        console.print(f"[dim]loaded environment from {env_path}[/dim]")
 
     graph = None
     while True:
@@ -173,8 +188,8 @@ def chat(
                 graph = build_graph(session.workspace, AgentConfig(model=session.model))
             except Exception as exc:
                 if "Missing credentials" in str(exc):
-                    console.print("[red]Failed to initialize graph:[/red] missing OpenAI credentials.")
-                    console.print("Set OPENAI_API_KEY before natural-language tasks, or run /doctor.")
+                    console.print("[red]Failed to initialize graph:[/red] missing DeepSeek credentials.")
+                    console.print("Set DEEPSEEK_API_KEY in .env before natural-language tasks, or run /doctor.")
                 else:
                     console.print(f"[red]Failed to initialize graph:[/red] {exc}")
                     console.print("Run /doctor to inspect missing dependencies or environment variables.")

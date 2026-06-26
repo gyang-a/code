@@ -17,9 +17,16 @@ The project is intentionally scoped like a resume-grade MVP:
 pip install -e ".[dev]"
 ```
 
-Set `OPENAI_API_KEY` before asking natural-language tasks.
+Set `DEEPSEEK_API_KEY` before asking natural-language tasks.
 
 ## Run
+
+Create a local `.env` file for model credentials:
+
+```bash
+DEEPSEEK_API_KEY=your-deepseek-api-key-here
+# CODE_AGENT_MODEL=deepseek-v4-flash
+```
 
 ```bash
 code-agent .

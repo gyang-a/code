@@ -5,10 +5,12 @@ description = "A workspace-safe CLI code agent built with LangGraph tool calling
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "langchain>=1.0.0",
     "langchain-core>=0.3.0",
-    "langchain-openai>=0.2.0",
+    "langchain-deepseek>=0.1.0",
     "langgraph>=0.2.0",
     "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
     "rich>=13.7.0",
     "typer>=0.12.0",
 ]

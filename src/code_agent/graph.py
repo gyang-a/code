@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
+from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -90,7 +90,14 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
     )
     tools = build_tools(workspace)
     tools_by_name = {tool.name: tool for tool in tools}
-    llm = ChatOpenAI(model=agent_config.model, temperature=0)
+    llm_kwargs = {"temperature": 0}
+    if agent_config.api_key:
+        llm_kwargs["api_key"] = agent_config.api_key
+    llm = init_chat_model(
+        agent_config.model,
+        model_provider="deepseek",
+        **llm_kwargs,
+    )
     llm_with_tools = llm.bind_tools(tools)
     tool_node = ToolNode(tools)
 
