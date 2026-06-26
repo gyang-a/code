@@ -10,19 +10,20 @@ from code_agent.ui.console import console
 
 
 NODE_LABELS = {
-    "load_project_context": "loaded project context",
-    "route_input": "routed input",
-    "command_handler": "handled slash command",
-    "plan_node": "created task plan",
-    "agent_loop": "agent thinking",
-    "execute": "executed tool call",
-    "tool_result_router": "classified tool result",
-    "approval": "waiting for approval",
-    "reject": "handled rejected action",
-    "observe": "observed result",
-    "validation_node": "ran validation",
-    "review_diff_node": "reviewed diff",
-    "final_summary": "prepared final summary",
+    "load_project_context": "已加载项目上下文",
+    "route_input": "已路由输入",
+    "command_handler": "已处理 slash command",
+    "direct_response": "已直接回复",
+    "plan_node": "已生成任务计划",
+    "agent_loop": "Agent 正在思考",
+    "execute": "已执行工具调用",
+    "tool_result_router": "已分类工具结果",
+    "approval": "等待审批",
+    "reject": "已处理拒绝操作",
+    "observe": "已观察结果",
+    "validation_node": "已运行验证",
+    "review_diff_node": "已检查 diff",
+    "final_summary": "已准备最终总结",
 }
 
 
@@ -61,16 +62,16 @@ def _render_node_update(node_name: str, update: Mapping[str, Any]) -> None:
         _render_messages(update["messages"])
 
     if update.get("approval_reason"):
-        console.print(f"[yellow]  approval required:[/yellow] {update['approval_reason']}")
+        console.print(f"[yellow]  需要审批:[/yellow] {update['approval_reason']}")
 
     if update.get("rejected_reason"):
-        console.print(f"[red]  rejected:[/red] {update['rejected_reason']}")
+        console.print(f"[red]  已拒绝:[/red] {update['rejected_reason']}")
 
     if update.get("test_command"):
-        console.print(f"[dim]  validation command: {update['test_command']}[/dim]")
+        console.print(f"[dim]  验证命令: {update['test_command']}[/dim]")
 
     if update.get("test_result"):
-        first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "validation complete"
+        first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "验证完成"
         console.print(f"[dim]  {first_line}[/dim]")
 
     if update.get("diff_summary"):
@@ -84,13 +85,13 @@ def _render_messages(messages: list[BaseMessage]) -> None:
             for tool_call in tool_calls:
                 name = tool_call.get("name", "tool")
                 args = tool_call.get("args") or {}
-                console.print(f"[cyan]  tool call:[/cyan] {name}({_format_args(args)})")
+                console.print(f"[cyan]  工具调用:[/cyan] {name}({_format_args(args)})")
             if message.content and not tool_calls:
-                console.print(f"[dim]  agent drafted response[/dim]")
+                console.print(f"[dim]  Agent 已生成回复草稿[/dim]")
         elif isinstance(message, ToolMessage):
-            first_line = str(message.content).splitlines()[0] if str(message.content).strip() else "empty tool result"
+            first_line = str(message.content).splitlines()[0] if str(message.content).strip() else "空工具结果"
             style = "yellow" if "APPROVAL_REQUIRED" in first_line else "red" if "REJECTED" in first_line else "dim"
-            console.print(f"[{style}]  tool result:[/{style}] {truncate(first_line, 180)}")
+            console.print(f"[{style}]  工具结果:[/{style}] {truncate(first_line, 180)}")
 
 
 def _format_args(args: Mapping[str, Any]) -> str:

@@ -96,7 +96,7 @@ class PermissionTests(unittest.TestCase):
                 }
             )
 
-            self.assertIn("Patched pyproject.toml", approved_result)
+            self.assertIn("已修补 pyproject.toml", approved_result)
             self.assertEqual((tmp_path / "pyproject.toml").read_text(encoding="utf-8"), "name = \"new\"\n")
 
 

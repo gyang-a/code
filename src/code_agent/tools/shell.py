@@ -14,21 +14,21 @@ APPROVAL_TOKEN = "approved"
 def build_run_command_tool(workspace: Workspace):
     @tool
     def run_command(command: str, timeout_seconds: int = 60, approval_token: str | None = None) -> str:
-        """Run an approved validation command. Level 2 commands require confirmation; Level 3 commands are rejected."""
+        """运行已允许的验证命令；Level 2 命令需要确认，Level 3 命令会被拒绝。"""
         decision, argv = classify_command(command, workspace)
         if decision.risk.value == "level_3":
             return rejected(decision.risk, decision.reason)
         if (decision.requires_approval or argv is None) and approval_token != APPROVAL_TOKEN:
             return approval_required(decision.risk, decision.reason)
         if argv is None:
-            return f"ERROR: Approved command has no executable argv: {command}"
+            return f"ERROR: 已审批命令没有可执行 argv: {command}"
         timeout_seconds = min(max(timeout_seconds, 1), 180)
         try:
             result = run_argv(argv, workspace.root, timeout=timeout_seconds)
         except FileNotFoundError as exc:
             return f"ERROR: {exc}"
         except subprocess.TimeoutExpired:
-            return f"ERROR: Command timed out after {timeout_seconds}s"
+            return f"ERROR: 命令在 {timeout_seconds}s 后超时"
 
         output = result.stdout + result.stderr
         return truncate(

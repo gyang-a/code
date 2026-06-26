@@ -40,47 +40,47 @@ DEFAULT_COMMANDS = {
     "pytest": CommandSpec(
         name="pytest",
         argv=["python", "-m", "pytest"],
-        description="Run Python tests with pytest.",
+        description="使用 pytest 运行 Python 测试。",
     ),
     "python_compile": CommandSpec(
         name="python_compile",
         argv=["python", "-m", "compileall", "-q", "."],
-        description="Compile Python files for syntax validation.",
+        description="编译 Python 文件，用于语法验证。",
     ),
     "npm_test": CommandSpec(
         name="npm_test",
         argv=["npm", "test"],
-        description="Run npm test script.",
+        description="运行 npm test 脚本。",
     ),
     "npm_lint": CommandSpec(
         name="npm_lint",
         argv=["npm", "run", "lint"],
-        description="Run npm lint script.",
+        description="运行 npm lint 脚本。",
     ),
     "npm_build": CommandSpec(
         name="npm_build",
         argv=["npm", "run", "build"],
-        description="Run npm build script.",
+        description="运行 npm build 脚本。",
     ),
     "pnpm_test": CommandSpec(
         name="pnpm_test",
         argv=["pnpm", "test"],
-        description="Run pnpm test script.",
+        description="运行 pnpm test 脚本。",
     ),
     "pnpm_lint": CommandSpec(
         name="pnpm_lint",
         argv=["pnpm", "lint"],
-        description="Run pnpm lint script.",
+        description="运行 pnpm lint 脚本。",
     ),
     "pnpm_build": CommandSpec(
         name="pnpm_build",
         argv=["pnpm", "build"],
-        description="Run pnpm build script.",
+        description="运行 pnpm build 脚本。",
     ),
     "uv_pytest": CommandSpec(
         name="uv_pytest",
         argv=["uv", "run", "pytest"],
-        description="Run pytest through uv.",
+        description="通过 uv 运行 pytest。",
     ),
 }
 
@@ -131,7 +131,7 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
         return PermissionDecision(
             risk=RiskLevel.level_3,
             allowed=False,
-            reason=f"{operation} refused for sensitive path: {normalized}",
+            reason=f"{operation} 拒绝访问敏感路径: {normalized}",
         )
 
     if operation == "delete_file":
@@ -139,7 +139,7 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"Deleting files requires confirmation: {normalized}",
+            reason=f"删除文件需要确认: {normalized}",
         )
 
     if name in LEVEL_2_FILES:
@@ -147,7 +147,7 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"Modifying {normalized} requires confirmation.",
+            reason=f"修改 {normalized} 需要确认。",
         )
 
     if operation == "create_file" and not (
@@ -157,7 +157,7 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"Creating files outside src/ or tests/ requires confirmation: {normalized}",
+            reason=f"在 src/ 或 tests/ 之外创建文件需要确认: {normalized}",
         )
 
     if operation == "write_file" and not (
@@ -167,13 +167,13 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"Overwriting files outside src/ or tests/ requires confirmation: {normalized}",
+            reason=f"覆盖 src/ 或 tests/ 之外的文件需要确认: {normalized}",
         )
 
     return PermissionDecision(
         risk=RiskLevel.level_1,
         allowed=True,
-        reason=f"{operation} allowed as a low-risk workspace edit: {normalized}",
+        reason=f"{operation} 已允许，属于低风险工作区编辑: {normalized}",
     )
 
 
@@ -186,7 +186,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             PermissionDecision(
                 risk=RiskLevel.level_3,
                 allowed=False,
-                reason=f"Command is forbidden by safety policy: {command}",
+                reason=f"命令被安全策略禁止: {command}",
             ),
             None,
         )
@@ -196,7 +196,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             PermissionDecision(
                 risk=RiskLevel.level_3,
                 allowed=False,
-                reason=f"Command is forbidden by safety policy: {command}",
+                reason=f"命令被安全策略禁止: {command}",
             ),
             None,
         )
@@ -211,7 +211,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
                 risk=RiskLevel.level_2,
                 allowed=False,
                 requires_approval=True,
-                reason=f"Command requires confirmation: {command}",
+                reason=f"命令需要确认: {command}",
             ),
             argv,
         )
@@ -223,7 +223,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             PermissionDecision(
                 risk=spec.risk,
                 allowed=True,
-                reason=f"Named validation command allowed: {stripped}",
+                reason=f"已允许命名验证命令: {stripped}",
             ),
             spec.argv,
         )
@@ -235,7 +235,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
                 PermissionDecision(
                     risk=spec.risk,
                     allowed=True,
-                    reason=f"Validation command allowed: {rendered}",
+                    reason=f"已允许验证命令: {rendered}",
                 ),
                 spec.argv,
             )
@@ -250,7 +250,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             PermissionDecision(
                 risk=RiskLevel.level_1,
                 allowed=True,
-                reason=f"Validation command allowed: {command}",
+                reason=f"已允许验证命令: {command}",
             ),
             argv,
         )
@@ -260,7 +260,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"Command is not in the safe validation allowlist: {command}",
+            reason=f"命令不在安全验证命令白名单中: {command}",
         ),
         None,
     )
@@ -269,7 +269,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
 def run_argv(argv: list[str], cwd: Path, *, timeout: int) -> subprocess.CompletedProcess[str]:
     executable = shutil.which(argv[0])
     if executable is None:
-        raise FileNotFoundError(f"Executable not found: {argv[0]}")
+        raise FileNotFoundError(f"找不到可执行文件: {argv[0]}")
 
     return subprocess.run(
         argv,

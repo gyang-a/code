@@ -20,7 +20,7 @@ def _should_skip(workspace: Workspace, path: Path) -> bool:
 def build_search_text_tool(workspace: Workspace):
     @tool
     def search_text(query: str, path: str = ".", max_results: int = 100) -> str:
-        """Search text in the workspace using ripgrep when available."""
+        """在工作区内搜索文本；优先使用 ripgrep。"""
         try:
             search_root = workspace.resolve(path)
         except WorkspaceError as exc:
@@ -72,7 +72,7 @@ def build_search_text_tool(workspace: Workspace):
                             return truncate("\n".join(matches))
             return truncate("\n".join(matches))
         except subprocess.TimeoutExpired:
-            return "ERROR: Search timed out."
+            return "ERROR: 搜索超时。"
 
     return search_text
 
@@ -80,7 +80,7 @@ def build_search_text_tool(workspace: Workspace):
 def build_find_files_tool(workspace: Workspace):
     @tool
     def find_files(pattern: str, path: str = ".", max_results: int = 200) -> str:
-        """Find files by glob-like pattern inside the workspace."""
+        """在工作区内按类似 glob 的模式查找文件。"""
         try:
             search_root = workspace.resolve(path)
         except WorkspaceError as exc:

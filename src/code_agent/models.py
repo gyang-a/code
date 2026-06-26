@@ -13,8 +13,8 @@ class RiskLevel(str, Enum):
 
 
 class CommandSpec(BaseModel):
-    name: str = Field(description="Stable command name exposed to the model.")
-    argv: list[str] = Field(description="Command argv executed with shell disabled.")
+    name: str = Field(description="暴露给模型的稳定命令名。")
+    argv: list[str] = Field(description="以 shell=False 执行的命令 argv。")
     risk: RiskLevel = RiskLevel.level_1
     description: str = ""
 

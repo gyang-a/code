@@ -13,7 +13,7 @@ from code_agent.config import (
 
 
 class WorkspaceError(ValueError):
-    """Raised when a workspace operation violates the sandbox."""
+    """工作区操作违反沙箱策略时抛出。"""
 
 
 class Workspace:
@@ -29,9 +29,9 @@ class Workspace:
         self.exclude_globs = exclude_globs
 
         if not self.root.exists():
-            raise WorkspaceError(f"Workspace does not exist: {self.root}")
+            raise WorkspaceError(f"工作区不存在: {self.root}")
         if not self.root.is_dir():
-            raise WorkspaceError(f"Workspace is not a directory: {self.root}")
+            raise WorkspaceError(f"工作区不是目录: {self.root}")
 
     def resolve(self, relative_path: str | Path) -> Path:
         candidate = Path(relative_path)
@@ -43,7 +43,7 @@ class Workspace:
         try:
             path.relative_to(self.root)
         except ValueError as exc:
-            raise WorkspaceError(f"Path escapes workspace: {relative_path}") from exc
+            raise WorkspaceError(f"路径逃逸工作区: {relative_path}") from exc
 
         return path
 
@@ -69,15 +69,15 @@ class Workspace:
     def assert_readable_file(self, path: str | Path) -> Path:
         resolved = self.resolve(path)
         if self.is_sensitive(resolved):
-            raise WorkspaceError(f"Refusing to read sensitive file: {self.relative(resolved)}")
+            raise WorkspaceError(f"拒绝读取敏感文件: {self.relative(resolved)}")
         if not resolved.exists():
-            raise WorkspaceError(f"File not found: {path}")
+            raise WorkspaceError(f"文件不存在: {path}")
         if not resolved.is_file():
-            raise WorkspaceError(f"Not a file: {path}")
+            raise WorkspaceError(f"不是文件: {path}")
         if resolved.stat().st_size > self.read_limit:
             raise WorkspaceError(
-                f"File too large ({resolved.stat().st_size} bytes). "
-                f"Use a smaller range or search first: {self.relative(resolved)}"
+                f"文件过大（{resolved.stat().st_size} bytes）。"
+                f"请先搜索或读取更小范围: {self.relative(resolved)}"
             )
         return resolved
 
@@ -85,15 +85,15 @@ class Workspace:
         resolved = self.assert_readable_file(path)
         data = resolved.read_bytes()
         if b"\x00" in data[:4096]:
-            raise WorkspaceError(f"Refusing to read binary file: {self.relative(resolved)}")
+            raise WorkspaceError(f"拒绝读取二进制文件: {self.relative(resolved)}")
         return data.decode("utf-8", errors="replace")
 
     def write_text(self, path: str | Path, content: str, *, overwrite: bool = True) -> Path:
         resolved = self.resolve(path)
         if self.is_sensitive(resolved):
-            raise WorkspaceError(f"Refusing to write sensitive file: {self.relative(resolved)}")
+            raise WorkspaceError(f"拒绝写入敏感文件: {self.relative(resolved)}")
         if resolved.exists() and not overwrite:
-            raise WorkspaceError(f"File already exists: {self.relative(resolved)}")
+            raise WorkspaceError(f"文件已存在: {self.relative(resolved)}")
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content, encoding="utf-8", newline="")
         return resolved
@@ -101,9 +101,9 @@ class Workspace:
     def iter_tree(self, path: str | Path = ".", *, max_entries: int = 200) -> list[str]:
         root = self.resolve(path)
         if not root.exists():
-            raise WorkspaceError(f"Directory not found: {path}")
+            raise WorkspaceError(f"目录不存在: {path}")
         if not root.is_dir():
-            raise WorkspaceError(f"Not a directory: {path}")
+            raise WorkspaceError(f"不是目录: {path}")
 
         lines: list[str] = []
         count = 0
@@ -130,7 +130,7 @@ class Workspace:
                 lines.append(f"{prefix}  {filename}")
                 count += 1
                 if count >= max_entries:
-                    lines.append("... truncated ...")
+                    lines.append("... 已截断 ...")
                     return lines
 
         return lines

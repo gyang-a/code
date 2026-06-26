@@ -1,1 +1,1 @@
-"""Service layer for workspace, patching, planning, and summarization."""
+"""工作区、补丁、规划和总结相关服务。"""

@@ -3,10 +3,10 @@ from __future__ import annotations
 
 def default_plan(user_goal: str) -> list[str]:
     return [
-        "Inspect project structure and relevant manifests.",
-        "Search for files related to the user's goal.",
-        "Read the smallest useful set of files.",
-        "Apply targeted edits through safe tools if needed.",
-        "Run an available validation command.",
-        "Summarize changes, validation, and remaining risks.",
+        "检查项目结构和相关清单文件。",
+        "搜索与用户目标相关的文件。",
+        "读取最小且必要的文件集合。",
+        "如需修改，通过安全工具应用小范围编辑。",
+        "运行可用且相关的验证命令。",
+        "总结修改内容、验证结果和剩余风险。",
     ]

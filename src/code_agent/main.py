@@ -83,15 +83,15 @@ def _run_git_diff(workspace: str) -> str:
 def _doctor(workspace: str) -> None:
     env_path = Path(workspace) / ".env"
     table_rows = [
-        ("workspace", "ok" if Path(workspace).is_dir() else "missing"),
-        (".env", "found" if env_path.exists() else "missing"),
-        ("DEEPSEEK_API_KEY", "set" if os.getenv("DEEPSEEK_API_KEY") else "missing"),
-        ("CODE_AGENT_MODEL", os.getenv("CODE_AGENT_MODEL") or "not set"),
-        ("git", "found" if shutil.which("git") else "missing"),
-        ("rg", "found" if shutil.which("rg") else "missing; Python fallback will be used"),
-        ("langgraph", "found" if importlib.util.find_spec("langgraph") else "missing"),
-        ("langchain", "found" if importlib.util.find_spec("langchain") else "missing"),
-        ("langchain_deepseek", "found" if importlib.util.find_spec("langchain_deepseek") else "missing"),
+        ("工作区", "正常" if Path(workspace).is_dir() else "缺失"),
+        (".env", "已找到" if env_path.exists() else "缺失"),
+        ("DEEPSEEK_API_KEY", "已设置" if os.getenv("DEEPSEEK_API_KEY") else "缺失"),
+        ("CODE_AGENT_MODEL", os.getenv("CODE_AGENT_MODEL") or "未设置"),
+        ("git", "已找到" if shutil.which("git") else "缺失"),
+        ("rg", "已找到" if shutil.which("rg") else "缺失，将使用 Python fallback"),
+        ("langgraph", "已找到" if importlib.util.find_spec("langgraph") else "缺失"),
+        ("langchain", "已找到" if importlib.util.find_spec("langchain") else "缺失"),
+        ("langchain_deepseek", "已找到" if importlib.util.find_spec("langchain_deepseek") else "缺失"),
     ]
     for name, status in table_rows:
         console.print(f"[bold]{name}[/bold]: {status}")
@@ -108,50 +108,50 @@ def _handle_slash(command: str, session: Session) -> bool:
         print_help()
     elif name == "/clear":
         session.reset()
-        console.print(f"Started fresh thread: {session.thread_id}")
+        console.print(f"已开启新的会话线程: {session.thread_id}")
     elif name == "/model":
         if arg:
             session.model = arg
-            console.print(f"Model set to {session.model}")
+            console.print(f"模型已设置为: {session.model}")
         else:
-            console.print(f"Current model: {session.model}")
+            console.print(f"当前模型: {session.model}")
     elif name == "/status":
-        console.print(f"workspace: {session.workspace}")
+        console.print(f"工作区: {session.workspace}")
         console.print(f"thread_id: {session.thread_id}")
-        console.print(f"model: {session.model}")
-        console.print(f"interactions: {session.interactions}")
+        console.print(f"模型: {session.model}")
+        console.print(f"交互次数: {session.interactions}")
     elif name == "/tools":
         try:
             workspace = Workspace(session.workspace)
             commands = available_commands(workspace)
             if not commands:
-                console.print("No validation commands detected.")
+                console.print("未检测到验证命令。")
             for command_name, spec in commands.items():
                 console.print(f"[bold]{command_name}[/bold]: {' '.join(spec.argv)}")
         except WorkspaceError as exc:
             console.print(f"[red]ERROR:[/red] {exc}")
     elif name == "/diff":
         diff = _run_git_diff(session.workspace)
-        console.print(diff or "No git diff.")
+        console.print(diff or "当前没有 git diff。")
     elif name == "/doctor":
         _doctor(session.workspace)
     elif name == "/usage":
-        console.print(f"interactions: {session.interactions}")
+        console.print(f"交互次数: {session.interactions}")
         console.print(f"thread_id: {session.thread_id}")
     elif name == "/mcp":
-        console.print("MCP integration is not configured in this MVP.")
+        console.print("当前 MVP 尚未配置 MCP 集成。")
     else:
-        console.print(f"Unknown slash command: {name}. Type /help.")
+        console.print(f"未知 slash command: {name}。输入 /help 查看命令。")
 
     return True
 
 
 @app.command()
 def chat(
-    workspace: str = typer.Argument(".", help="Workspace directory for the code agent."),
-    model: str | None = typer.Option(None, "--model", "-m", help="Override the chat model name."),
+    workspace: str = typer.Argument(".", help="代码智能体使用的工作区目录。"),
+    model: str | None = typer.Option(None, "--model", "-m", help="覆盖默认模型名称。"),
 ) -> None:
-    """Start an interactive workspace-safe code agent."""
+    """启动一个带工作区沙箱的交互式代码智能体。"""
     try:
         resolved_workspace = str(Path(workspace).expanduser().resolve())
         Workspace(resolved_workspace)
@@ -168,7 +168,7 @@ def chat(
     )
     print_banner(session.workspace, session.model)
     if loaded_env:
-        console.print(f"[dim]loaded environment from {env_path}[/dim]")
+        console.print(f"[dim]已从 {env_path} 加载环境变量[/dim]")
 
     graph = None
     while True:
@@ -188,16 +188,16 @@ def chat(
                 graph = build_graph(session.workspace, AgentConfig(model=session.model))
             except Exception as exc:
                 if "Missing credentials" in str(exc):
-                    console.print("[red]Failed to initialize graph:[/red] missing DeepSeek credentials.")
-                    console.print("Set DEEPSEEK_API_KEY in .env before natural-language tasks, or run /doctor.")
+                    console.print("[red]Graph 初始化失败:[/red] 缺少 DeepSeek 凭证。")
+                    console.print("请先在 .env 中设置 DEEPSEEK_API_KEY，或运行 /doctor 检查环境。")
                 else:
-                    console.print(f"[red]Failed to initialize graph:[/red] {exc}")
-                    console.print("Run /doctor to inspect missing dependencies or environment variables.")
+                    console.print(f"[red]Graph 初始化失败:[/red] {exc}")
+                    console.print("请运行 /doctor 检查依赖和环境变量。")
                 continue
 
         session.interactions += 1
         config = {"configurable": {"thread_id": session.thread_id}}
-        console.print("[dim]agent started[/dim]")
+        console.print("[dim]Agent 已启动[/dim]")
 
         try:
             final_answer = _run_graph_stream(graph, _initial_state(session, user_input), config)
@@ -209,22 +209,22 @@ def chat(
                     final_answer = values.get("final_answer") or values["messages"][-1].content
                     break
                 interrupt_value = interrupts[0].value
-                console.print("\n[bold yellow]approval required[/bold yellow]")
-                console.print(interrupt_value.get("reason", "Operation requires confirmation."))
+                console.print("\n[bold yellow]需要审批[/bold yellow]")
+                console.print(interrupt_value.get("reason", "该操作需要确认。"))
                 action = interrupt_value.get("action")
                 if action:
-                    console.print(f"tool: {action.get('tool')}")
-                    console.print(f"args: {action.get('args')}")
-                approved = Prompt.ask("Approve this Level 2 action?", choices=["y", "n"], default="n")
+                    console.print(f"工具: {action.get('tool')}")
+                    console.print(f"参数: {action.get('args')}")
+                approved = Prompt.ask("是否批准这个 Level 2 操作？", choices=["y", "n"], default="n")
                 final_answer = _run_graph_stream(graph, Command(resume={"approved": approved == "y"}), config)
         except Exception as exc:
-            console.print(f"[red]Agent error:[/red] {exc}")
+            console.print(f"[red]Agent 错误:[/red] {exc}")
             continue
 
         state = graph.get_state(config)
         session.tool_loops += state.values.get("iteration_count", 0)
         answer = final_answer or state.values.get("final_answer") or state.values["messages"][-1].content
-        console.print("\n[bold green]agent[/bold green]")
+        console.print("\n[bold green]Agent[/bold green]")
         console.print(answer)
 
 

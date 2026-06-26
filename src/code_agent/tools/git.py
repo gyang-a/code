@@ -24,7 +24,7 @@ def _run_git(workspace: Workspace, args: list[str], timeout: int = 10) -> str:
 def build_git_status_tool(workspace: Workspace):
     @tool
     def git_status() -> str:
-        """Show git status in short format for the workspace."""
+        """以 short 格式显示工作区 git status。"""
         try:
             return _run_git(workspace, ["status", "--short"])
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
@@ -36,7 +36,7 @@ def build_git_status_tool(workspace: Workspace):
 def build_git_diff_tool(workspace: Workspace):
     @tool
     def git_diff(path: str = ".") -> str:
-        """Show git diff for the workspace or one path."""
+        """显示整个工作区或指定路径的 git diff。"""
         try:
             resolved = workspace.resolve(path)
             rel = "." if resolved == workspace.root else workspace.relative(resolved)
