@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
+
+
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+    workspace: str
+    user_goal: str
+    input_kind: str | None
+    project_context: str | None
+
+    plan: list[str]
+    current_step: str | None
+    iteration_count: int
+    max_iterations: int
+
+    changed_files: list[str]
+    last_diff: str | None
+
+    test_command: str | None
+    test_result: str | None
+
+    needs_approval: bool
+    approval_reason: str | None
+    rejected_reason: str | None
+
+    tool_errors: list[str]
+    diff_summary: str | None
+    final_answer: str | None
