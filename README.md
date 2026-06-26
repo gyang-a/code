@@ -31,6 +31,18 @@ or:
 python -m code_agent.main .
 ```
 
+Natural-language tasks stream workflow events as the graph runs. You should see
+short updates such as:
+
+```text
+> loaded project context
+> created task plan
+  tool call: read_file(path='...')
+  tool result: ...
+> ran validation
+> prepared final summary
+```
+
 ## Slash Commands
 
 - `/help` shows commands
@@ -98,3 +110,20 @@ Try it with:
 ```
 
 Expected result: the CLI should pause for approval before writing.
+
+## Demo Script
+
+In the CLI, try:
+
+```text
+/doctor
+/tools
+看看这个项目的主要模块
+帮我解释权限系统在哪里实现
+帮我修改 pyproject.toml 的 description
+/diff
+```
+
+The `pyproject.toml` request should pause for Level 2 approval. While the agent
+runs, the CLI prints node progress, tool calls, tool results, validation, and
+diff review updates.

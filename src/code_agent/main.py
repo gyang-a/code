@@ -17,6 +17,7 @@ from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.safety import available_commands
 from code_agent.ui.console import console, print_banner, print_help
+from code_agent.ui.stream import final_answer_from_chunk, interrupt_from_chunk, render_stream_chunk
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -181,12 +182,18 @@ def chat(
 
         session.interactions += 1
         config = {"configurable": {"thread_id": session.thread_id}}
-        console.print("[dim]agent is inspecting the workspace...[/dim]")
+        console.print("[dim]agent started[/dim]")
 
         try:
-            result = graph.invoke(_initial_state(session, user_input), config=config)
-            while "__interrupt__" in result:
-                interrupt_value = result["__interrupt__"][0].value
+            final_answer = _run_graph_stream(graph, _initial_state(session, user_input), config)
+            while final_answer is None:
+                state = graph.get_state(config)
+                interrupts = state.interrupts
+                if not interrupts:
+                    values = state.values
+                    final_answer = values.get("final_answer") or values["messages"][-1].content
+                    break
+                interrupt_value = interrupts[0].value
                 console.print("\n[bold yellow]approval required[/bold yellow]")
                 console.print(interrupt_value.get("reason", "Operation requires confirmation."))
                 action = interrupt_value.get("action")
@@ -194,18 +201,29 @@ def chat(
                     console.print(f"tool: {action.get('tool')}")
                     console.print(f"args: {action.get('args')}")
                 approved = Prompt.ask("Approve this Level 2 action?", choices=["y", "n"], default="n")
-                result = graph.invoke(
-                    Command(resume={"approved": approved == "y"}),
-                    config=config,
-                )
+                final_answer = _run_graph_stream(graph, Command(resume={"approved": approved == "y"}), config)
         except Exception as exc:
             console.print(f"[red]Agent error:[/red] {exc}")
             continue
 
-        session.tool_loops += result.get("iteration_count", 0)
-        answer = result.get("final_answer") or result["messages"][-1].content
+        state = graph.get_state(config)
+        session.tool_loops += state.values.get("iteration_count", 0)
+        answer = final_answer or state.values.get("final_answer") or state.values["messages"][-1].content
         console.print("\n[bold green]agent[/bold green]")
         console.print(answer)
+
+
+def _run_graph_stream(graph, graph_input, config: dict) -> str | None:
+    final_answer = None
+    for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
+        render_stream_chunk(chunk)
+        interrupt_value = interrupt_from_chunk(chunk)
+        if interrupt_value is not None:
+            return None
+        chunk_answer = final_answer_from_chunk(chunk)
+        if chunk_answer:
+            final_answer = chunk_answer
+    return final_answer
 
 
 if __name__ == "__main__":
