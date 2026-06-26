@@ -59,7 +59,7 @@ python -m code_agent.main .
 - `/clear` 开启新的会话线程
 - `/model [name]` 查看或切换模型
 - `/status` 查看当前会话状态
-- `/tools` 查看检测到的安全验证命令
+- `/tools` 查看工具权限和 shell 风险分级规则
 - `/diff` 查看当前 git diff
 - `/doctor` 检查本地依赖和环境变量
 - `/usage` 查看本地交互计数
@@ -86,9 +86,17 @@ START
 ```
 
 模型永远不会直接访问文件系统。它只能调用工具层暴露的函数，而工具内部负责路径、文件大小、命令和敏感文件策略。
-写入后的验证不由 Graph 硬编码选择命令；`validation_node` 只提醒 Agent 进入验证阶段，是否运行 `pytest`、`npm build`、`pnpm test`、`uv run pytest` 等命令由 Agent 通过受限 `run_shell` 自己决定。
+写入后的验证不由 Graph 硬编码选择命令；`validation_node` 只提醒 Agent 进入验证阶段。Agent 自己按项目文件和报错上下文写出需要执行的命令，再交给 permission rules 分级，最后由受限 `run_shell` 在 sandbox 中执行。
 
 Slash commands 由 CLI 控制面优先处理，所以 `/help`、`/diff`、`/doctor` 这类命令不需要调用 LLM。
+
+## 分层边界
+
+第一层是 permission rules：在工具执行前判断某个 tool call 或某条 shell 命令属于 Level 0-3。这里不维护项目命令表，不替 Agent 选择 `pytest`、`npm test` 或 `uv run pytest`；它只审查 Agent 自己写出的命令是否允许、需要确认或必须拒绝。
+
+第二层是 sandbox：只负责运行 `run_shell` 及其子进程。当前 MVP 使用固定 cwd、`shell=False`、UTF-8 输出解码、环境标记和明显路径越界拦截；后续可以把 `ShellSandbox` 替换成真正的 OS/container sandbox。
+
+第三层是 memory：读取 `CLAUDE.md`、`AGENTS.md`、`.code-agent/memory.md` 作为上下文提示。memory 不参与权限判断，也不能放行任何工具或命令。
 
 ## 权限等级
 

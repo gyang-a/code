@@ -7,7 +7,7 @@ from langchain_core.tools import tool
 from code_agent.services.patcher import replace_exact_once
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
-from code_agent.tools.safety import approval_required, allowed, classify_file_operation, rejected
+from code_agent.tools.safety import approval_required, allowed, classify_tool_call, rejected
 
 
 APPROVAL_TOKEN = "approved"
@@ -55,6 +55,9 @@ def build_read_file_tool(workspace: Workspace):
     def read_file(path: str) -> str:
         """读取工作区内的文本文件；敏感文件、二进制文件和超大文件会被拒绝。"""
         try:
+            decision = classify_tool_call(workspace, "read_file", {"path": path})
+            if decision.risk.value == "level_3":
+                return rejected(decision.risk, decision.reason)
             return workspace.read_text(path)
         except WorkspaceError as exc:
             return _error(exc)
@@ -67,6 +70,9 @@ def build_list_files_tool(workspace: Workspace):
     def list_files(path: str = ".") -> str:
         """列出工作区目录下的直接子项。"""
         try:
+            decision = classify_tool_call(workspace, "list_files", {"path": path})
+            if decision.risk.value == "level_3":
+                return rejected(decision.risk, decision.reason)
             dir_path = workspace.resolve(path)
             if not dir_path.exists():
                 return f"ERROR: 目录不存在: {path}"
@@ -91,6 +97,9 @@ def build_get_file_tree_tool(workspace: Workspace):
     def get_file_tree(path: str = ".", max_entries: int = 200) -> str:
         """返回工作区路径下有数量上限的文件树。"""
         try:
+            decision = classify_tool_call(workspace, "get_file_tree", {"path": path})
+            if decision.risk.value == "level_3":
+                return rejected(decision.risk, decision.reason)
             max_entries = min(max(max_entries, 1), 1000)
             return "\n".join(workspace.iter_tree(path, max_entries=max_entries))
         except WorkspaceError as exc:
@@ -104,7 +113,7 @@ def build_patch_file_tool(workspace: Workspace):
     def patch_file(path: str, old: str, new: str, approval_token: str | None = None) -> str:
         """替换文件中的一个精确文本块；old 文本必须只出现一次。"""
         try:
-            decision = classify_file_operation(workspace, "patch_file", path)
+            decision = classify_tool_call(workspace, "patch_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
             if decision.requires_approval and approval_token != APPROVAL_TOKEN:
@@ -127,7 +136,7 @@ def build_create_file_tool(workspace: Workspace):
     def create_file(path: str, content: str, approval_token: str | None = None) -> str:
         """在工作区内创建新的文本文件；如果文件已存在则拒绝。"""
         try:
-            decision = classify_file_operation(workspace, "create_file", path)
+            decision = classify_tool_call(workspace, "create_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
             if decision.requires_approval and approval_token != APPROVAL_TOKEN:
@@ -145,7 +154,7 @@ def build_write_file_tool(workspace: Workspace):
     def write_file(path: str, content: str, approval_token: str | None = None) -> str:
         """覆盖工作区内的小文本文件；编辑已有文件时优先使用 patch_file。"""
         try:
-            decision = classify_file_operation(workspace, "write_file", path)
+            decision = classify_tool_call(workspace, "write_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
             if decision.requires_approval and approval_token != APPROVAL_TOKEN:
@@ -167,7 +176,7 @@ def build_delete_file_tool(workspace: Workspace):
     def delete_file(path: str, approval_token: str | None = None) -> str:
         """请求删除工作区文件；没有人工审批时不会删除。"""
         try:
-            decision = classify_file_operation(workspace, "delete_file", path)
+            decision = classify_tool_call(workspace, "delete_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
             if approval_token != APPROVAL_TOKEN:

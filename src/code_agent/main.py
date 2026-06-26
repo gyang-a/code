@@ -16,7 +16,7 @@ from code_agent.config import AgentConfig, DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL
 from code_agent.services.env import load_dotenv
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
-from code_agent.tools.safety import available_commands
+from code_agent.tools.safety import describe_permission_policy
 from code_agent.ui.console import console, print_banner, print_help
 from code_agent.ui.stream import final_answer_from_chunk, interrupt_from_chunk, render_stream_chunk
 
@@ -126,15 +126,7 @@ def _handle_slash(command: str, session: Session) -> bool:
         console.print(f"模型: {session.model}")
         console.print(f"交互次数: {session.interactions}")
     elif name == "/tools":
-        try:
-            workspace = Workspace(session.workspace)
-            commands = available_commands(workspace)
-            if not commands:
-                console.print("未检测到验证命令。")
-            for command_name, spec in commands.items():
-                console.print(f"[bold]{command_name}[/bold]: {' '.join(spec.argv)}")
-        except WorkspaceError as exc:
-            console.print(f"[red]ERROR:[/red] {exc}")
+        console.print(describe_permission_policy())
     elif name == "/diff":
         diff = _run_git_diff(session.workspace)
         console.print(diff or "当前没有 git diff。")

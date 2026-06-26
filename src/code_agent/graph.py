@@ -11,6 +11,7 @@ from langgraph.types import interrupt
 
 from code_agent.config import AgentConfig
 from code_agent.prompts import SYSTEM_PROMPT
+from code_agent.services.memory import format_project_memory, load_project_memory
 from code_agent.services.planner import default_plan
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace
@@ -29,7 +30,7 @@ from code_agent.tools import (
     build_search_text_tool,
     build_write_file_tool,
 )
-from code_agent.tools.safety import available_commands
+from code_agent.tools.safety import describe_permission_policy
 
 
 def build_tools(workspace: Workspace):
@@ -130,7 +131,8 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         context = (
             f"工作区: {workspace.root}\n"
             f"检测到的清单文件: {', '.join(manifest_names) or '无'}\n"
-            f"文件树:\n{tree}"
+            f"文件树:\n{tree}\n\n"
+            f"项目记忆:\n{format_project_memory(load_project_memory(workspace))}"
         )
         return {"project_context": context}
 
@@ -145,8 +147,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         elif command == "/diff":
             answer = _git_output(workspace, ["diff", "--", "."], timeout=20) or "当前没有 git diff。"
         elif command == "/tools":
-            commands = available_commands(workspace)
-            answer = "\n".join(f"{name}: {' '.join(spec.argv)}" for name, spec in commands.items()) or "未检测到验证命令。"
+            answer = describe_permission_policy()
         else:
             answer = f"Slash command {command} 已由 CLI 控制层处理。"
         return {"final_answer": answer}
@@ -377,17 +378,13 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         if not _should_validate(state):
             return {"test_result": "已跳过验证：本轮没有修改文件。"}
 
-        commands = available_commands(workspace)
-        command_lines = "\n".join(
-            f"- {name}: {' '.join(spec.argv)} ({spec.description})"
-            for name, spec in commands.items()
-        )
         prompt = HumanMessage(
             content=(
                 "本轮已经发生文件修改。现在请你自己判断是否需要验证。\n"
                 "如果需要验证，请调用 run_shell 工具运行最相关的一条安全命令；"
                 "如果不需要或没有合适命令，请直接说明跳过原因，不要调用工具。\n\n"
-                f"检测到的安全验证命令：\n{command_lines or '- 无'}"
+                "不要等待系统提供命令列表。请根据已读取到的项目文件和工具结果自己选择命令，"
+                "例如项目需要时可以尝试 pytest、uv run pytest、npm test、npm run build、pnpm test 等。"
             )
         )
         return {

@@ -50,6 +50,26 @@ class PermissionTests(unittest.TestCase):
             self.assertTrue(decision.requires_approval)
             self.assertEqual(argv, ["npm", "install"])
 
+    def test_ai_written_test_command_is_allowed_without_registry(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, argv = classify_command("npm test", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_1)
+            self.assertTrue(decision.allowed)
+            self.assertEqual(argv, ["npm", "test"])
+
+    def test_unknown_shell_command_requires_approval_but_preserves_argv(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, argv = classify_command("python scripts/custom_check.py", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_2)
+            self.assertTrue(decision.requires_approval)
+            self.assertEqual(argv, ["python", "scripts/custom_check.py"])
+
     def test_rm_rf_is_forbidden(self) -> None:
         with TemporaryWorkspace() as tmp_path:
             workspace = Workspace(tmp_path)
