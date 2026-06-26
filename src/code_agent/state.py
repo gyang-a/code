@@ -27,6 +27,7 @@ class AgentState(TypedDict):
 
     needs_approval: bool
     approval_reason: str | None
+    pending_approval: dict | None
     rejected_reason: str | None
 
     tool_errors: list[str]

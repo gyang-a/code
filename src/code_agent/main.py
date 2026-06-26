@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import typer
+from langgraph.types import Command
 from rich.prompt import Prompt
 
 from code_agent.config import AgentConfig, DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL
@@ -53,6 +54,7 @@ def _initial_state(session: Session, user_input: str) -> dict:
         "test_result": None,
         "needs_approval": False,
         "approval_reason": None,
+        "pending_approval": None,
         "rejected_reason": None,
         "tool_errors": [],
         "diff_summary": None,
@@ -183,6 +185,19 @@ def chat(
 
         try:
             result = graph.invoke(_initial_state(session, user_input), config=config)
+            while "__interrupt__" in result:
+                interrupt_value = result["__interrupt__"][0].value
+                console.print("\n[bold yellow]approval required[/bold yellow]")
+                console.print(interrupt_value.get("reason", "Operation requires confirmation."))
+                action = interrupt_value.get("action")
+                if action:
+                    console.print(f"tool: {action.get('tool')}")
+                    console.print(f"args: {action.get('args')}")
+                approved = Prompt.ask("Approve this Level 2 action?", choices=["y", "n"], default="n")
+                result = graph.invoke(
+                    Command(resume={"approved": approved == "y"}),
+                    config=config,
+                )
         except Exception as exc:
             console.print(f"[red]Agent error:[/red] {exc}")
             continue

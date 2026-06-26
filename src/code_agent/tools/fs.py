@@ -10,6 +10,9 @@ from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.safety import approval_required, allowed, classify_file_operation, rejected
 
 
+APPROVAL_TOKEN = "approved"
+
+
 def _error(exc: Exception) -> str:
     return f"ERROR: {exc}"
 
@@ -93,13 +96,13 @@ def build_get_file_tree_tool(workspace: Workspace):
 
 def build_patch_file_tool(workspace: Workspace):
     @tool
-    def patch_file(path: str, old: str, new: str) -> str:
+    def patch_file(path: str, old: str, new: str, approval_token: str | None = None) -> str:
         """Replace one exact text block in a file. The old text must appear exactly once."""
         try:
             decision = classify_file_operation(workspace, "patch_file", path)
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            if decision.requires_approval:
+            if decision.requires_approval and approval_token != APPROVAL_TOKEN:
                 return approval_required(decision.risk, decision.reason)
             result = replace_exact_once(workspace, path, old, new)
             if not result.changed:
@@ -116,13 +119,13 @@ def build_patch_file_tool(workspace: Workspace):
 
 def build_create_file_tool(workspace: Workspace):
     @tool
-    def create_file(path: str, content: str) -> str:
+    def create_file(path: str, content: str, approval_token: str | None = None) -> str:
         """Create a new text file inside the workspace. Existing files are rejected."""
         try:
             decision = classify_file_operation(workspace, "create_file", path)
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            if decision.requires_approval:
+            if decision.requires_approval and approval_token != APPROVAL_TOKEN:
                 return approval_required(decision.risk, decision.reason)
             workspace.write_text(path, content, overwrite=False)
             return f"{_format_decision_prefix(decision)}\nCreated {path}{_git_diff_for(workspace, path)}"
@@ -134,17 +137,18 @@ def build_create_file_tool(workspace: Workspace):
 
 def build_write_file_tool(workspace: Workspace):
     @tool
-    def write_file(path: str, content: str) -> str:
+    def write_file(path: str, content: str, approval_token: str | None = None) -> str:
         """Overwrite a small text file inside the workspace. Prefer patch_file for edits."""
         try:
             decision = classify_file_operation(workspace, "write_file", path)
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            if decision.requires_approval:
+            if decision.requires_approval and approval_token != APPROVAL_TOKEN:
                 return approval_required(decision.risk, decision.reason)
             existing = workspace.resolve(path)
             if existing.exists() and existing.stat().st_size > 20_000:
-                return approval_required(decision.risk, "Overwriting a file larger than 20KB requires confirmation.")
+                if approval_token != APPROVAL_TOKEN:
+                    return approval_required(decision.risk, "Overwriting a file larger than 20KB requires confirmation.")
             workspace.write_text(path, content, overwrite=True)
             return f"{_format_decision_prefix(decision)}\nWrote {path}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
@@ -155,13 +159,22 @@ def build_write_file_tool(workspace: Workspace):
 
 def build_delete_file_tool(workspace: Workspace):
     @tool
-    def delete_file(path: str) -> str:
+    def delete_file(path: str, approval_token: str | None = None) -> str:
         """Request deletion of a workspace file. This MVP never deletes without human approval."""
         try:
             decision = classify_file_operation(workspace, "delete_file", path)
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            return approval_required(decision.risk, decision.reason)
+            if approval_token != APPROVAL_TOKEN:
+                return approval_required(decision.risk, decision.reason)
+            file_path = workspace.resolve(path)
+            if not file_path.exists():
+                return f"ERROR: File not found: {path}"
+            if not file_path.is_file():
+                return f"ERROR: Not a file: {path}"
+            before = _git_diff_for(workspace, path)
+            file_path.unlink()
+            return f"{allowed(decision.risk, decision.reason)}\nDeleted {path}{before}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 

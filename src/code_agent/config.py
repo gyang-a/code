@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_MAX_ITERATIONS = 16
 DEFAULT_FILE_READ_LIMIT = 200_000
 DEFAULT_TOOL_OUTPUT_LIMIT = 12_000

@@ -202,6 +202,10 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
         )
 
     if any(lower.startswith(prefix) for prefix in LEVEL_2_COMMAND_PREFIXES):
+        try:
+            argv = shlex.split(stripped)
+        except ValueError:
+            argv = None
         return (
             PermissionDecision(
                 risk=RiskLevel.level_2,
@@ -209,7 +213,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
                 requires_approval=True,
                 reason=f"Command requires confirmation: {command}",
             ),
-            None,
+            argv,
         )
 
     commands = available_commands(workspace)

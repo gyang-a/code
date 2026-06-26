@@ -7,6 +7,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.types import interrupt
 
 from code_agent.config import AgentConfig
 from code_agent.prompts import SYSTEM_PROMPT
@@ -88,6 +89,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         exclude_globs=agent_config.exclude_globs,
     )
     tools = build_tools(workspace)
+    tools_by_name = {tool.name: tool for tool in tools}
     llm = ChatOpenAI(model=agent_config.model, temperature=0)
     llm_with_tools = llm.bind_tools(tools)
     tool_node = ToolNode(tools)
@@ -167,11 +169,20 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         rejection_reasons: list[str] = []
         errors: list[str] = []
         changed_files = set(state.get("changed_files", []))
+        pending_approval = None
+        tool_calls_by_id = _recent_tool_calls_by_id(state)
 
         for message in _recent_tool_messages(state):
             content = str(message.content)
             if "APPROVAL_REQUIRED[level_2]" in content:
                 approval_reasons.append(content.splitlines()[0])
+                tool_call = tool_calls_by_id.get(message.tool_call_id)
+                if tool_call and pending_approval is None:
+                    pending_approval = {
+                        "tool": tool_call["name"],
+                        "args": dict(tool_call.get("args") or {}),
+                        "reason": content.splitlines()[0],
+                    }
             elif "REJECTED[level_3]" in content:
                 rejection_reasons.append(content.splitlines()[0])
             elif content.startswith("ERROR:"):
@@ -184,7 +195,13 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             "tool_errors": [*state.get("tool_errors", []), *errors],
         }
         if approval_reasons:
-            update.update({"needs_approval": True, "approval_reason": "\n".join(approval_reasons)})
+            update.update(
+                {
+                    "needs_approval": True,
+                    "approval_reason": "\n".join(approval_reasons),
+                    "pending_approval": pending_approval,
+                }
+            )
         if rejection_reasons:
             update.update({"rejected_reason": "\n".join(rejection_reasons)})
         return update
@@ -198,18 +215,45 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
 
     def approval_node(state: AgentState):
         reason = state.get("approval_reason") or "Operation requires confirmation."
+        pending = state.get("pending_approval")
+        decision = interrupt(
+            {
+                "risk": "level_2",
+                "reason": reason,
+                "action": pending,
+            }
+        )
+        approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
+        if not approved:
+            return {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "The user denied the Level 2 operation.\n"
+                            f"{reason}\n"
+                            "Choose a safe alternative or stop with a clear explanation."
+                        )
+                    )
+                ],
+                "needs_approval": False,
+                "approval_reason": None,
+                "pending_approval": None,
+            }
+
+        execution_result = _execute_approved_tool(tools_by_name, pending)
         return {
             "messages": [
                 HumanMessage(
                     content=(
-                        "The last tool request required Level 2 approval and was not executed.\n"
+                        "The user approved the Level 2 operation.\n"
                         f"{reason}\n"
-                        "Choose a safe alternative, or explain what confirmation is needed."
+                        f"Execution result:\n{execution_result}"
                     )
                 )
             ],
             "needs_approval": False,
             "approval_reason": None,
+            "pending_approval": None,
         }
 
     def reject_node(state: AgentState):
@@ -362,3 +406,29 @@ def _summarize_diff(changed_files: list[str], diff: str) -> str:
     file_summary = ", ".join(changed_files) if changed_files else "No tracked file diff."
     line_count = len(diff.splitlines()) if diff else 0
     return f"Changed files: {file_summary}. Diff lines: {line_count}."
+
+
+def _recent_tool_calls_by_id(state: AgentState) -> dict[str, dict]:
+    for message in reversed(state["messages"]):
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            return {
+                tool_call["id"]: tool_call
+                for tool_call in tool_calls
+                if "id" in tool_call
+            }
+    return {}
+
+
+def _execute_approved_tool(tools_by_name: dict, pending: dict | None) -> str:
+    if not pending:
+        return "ERROR: No pending Level 2 action was found."
+    tool_name = pending.get("tool")
+    args = dict(pending.get("args") or {})
+    if tool_name not in tools_by_name:
+        return f"ERROR: Unknown pending tool: {tool_name}"
+    args["approval_token"] = "approved"
+    try:
+        return str(tools_by_name[tool_name].invoke(args))
+    except Exception as exc:
+        return f"ERROR: Approved tool execution failed: {exc}"

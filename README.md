@@ -79,3 +79,22 @@ Slash commands are handled by the CLI control plane first, so `/help`, `/diff`,
 The MVP returns `APPROVAL_REQUIRED[level_2]` for Level 2 actions. A later
 checkpoint/interrupt node can resume approved actions without changing the
 tool boundary.
+
+## Approval Flow
+
+Level 2 actions now use LangGraph interrupts:
+
+1. The tool returns `APPROVAL_REQUIRED[level_2]` without executing.
+2. The graph stores the pending tool name and arguments.
+3. The CLI shows the reason and asks for `y/n`.
+4. If approved, the graph resumes and executes the same tool with an internal
+   approval token.
+5. If denied, the agent receives an observation and must choose a safer path.
+
+Try it with:
+
+```text
+帮我修改 pyproject.toml 的 description
+```
+
+Expected result: the CLI should pause for approval before writing.
