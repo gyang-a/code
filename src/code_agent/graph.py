@@ -12,6 +12,7 @@ from code_agent.config import AgentConfig
 from code_agent.prompts import SYSTEM_PROMPT
 from code_agent.services.context import compact_messages, should_compact_messages
 from code_agent.services.metadata import build_turn_metadata
+from code_agent.services.sandbox import SandboxPolicy
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace
 from code_agent.state import AgentState
@@ -35,6 +36,7 @@ def build_tools(
     *,
     read_max_lines: int | None = None,
     tool_output_limit: int | None = None,
+    sandbox_policy: SandboxPolicy | None = None,
 ):
     return [
         build_list_files_tool(workspace),
@@ -49,7 +51,7 @@ def build_tools(
         build_create_file_tool(workspace),
         build_write_file_tool(workspace),
         build_delete_file_tool(workspace),
-        build_run_command_tool(workspace),
+        build_run_command_tool(workspace, sandbox_policy=sandbox_policy),
         build_git_status_tool(workspace),
         build_git_diff_tool(workspace),
     ]
@@ -156,6 +158,11 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         workspace,
         read_max_lines=agent_config.file_read_max_lines,
         tool_output_limit=agent_config.tool_output_limit,
+        sandbox_policy=SandboxPolicy(
+            backend=agent_config.shell_sandbox_backend,
+            docker_image=agent_config.docker_image,
+            allow_network=agent_config.docker_allow_network,
+        ),
     )
     tools_by_name = {tool.name: tool for tool in tools}
     llm_kwargs = {"temperature": 0}

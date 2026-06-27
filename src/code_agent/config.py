@@ -15,6 +15,8 @@ DEFAULT_CONTEXT_WINDOW_CHARS = 120_000
 DEFAULT_CONTEXT_COMPACTION_RATIO = 0.7
 DEFAULT_CONTEXT_CHAR_LIMIT = int(DEFAULT_CONTEXT_WINDOW_CHARS * DEFAULT_CONTEXT_COMPACTION_RATIO)
 DEFAULT_CONTEXT_KEEP_RECENT = 18
+DEFAULT_SHELL_SANDBOX_BACKEND = "local"
+DEFAULT_DOCKER_IMAGE = "python:3.12-slim"
 
 DEFAULT_EXCLUDE_GLOBS = (
     ".git/**",
@@ -63,4 +65,7 @@ class AgentConfig:
     context_compaction_ratio: float = DEFAULT_CONTEXT_COMPACTION_RATIO
     context_char_limit: int = DEFAULT_CONTEXT_CHAR_LIMIT
     context_keep_recent: int = DEFAULT_CONTEXT_KEEP_RECENT
+    shell_sandbox_backend: str = field(default_factory=lambda: os.getenv("CODE_AGENT_SHELL_SANDBOX", DEFAULT_SHELL_SANDBOX_BACKEND).lower())
+    docker_image: str = field(default_factory=lambda: os.getenv("CODE_AGENT_DOCKER_IMAGE", DEFAULT_DOCKER_IMAGE))
+    docker_allow_network: bool = field(default_factory=lambda: os.getenv("CODE_AGENT_DOCKER_NETWORK", "none").lower() not in {"", "0", "false", "none", "off"})
     exclude_globs: tuple[str, ...] = field(default_factory=lambda: DEFAULT_EXCLUDE_GLOBS)

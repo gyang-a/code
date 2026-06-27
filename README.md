@@ -28,7 +28,12 @@ pip install -e ".[dev]"
 ```bash
 DEEPSEEK_API_KEY=your-deepseek-api-key-here
 # CODE_AGENT_MODEL=deepseek-v4-flash
+# CODE_AGENT_SHELL_SANDBOX=docker
+# CODE_AGENT_DOCKER_IMAGE=python:3.12-slim
+# CODE_AGENT_DOCKER_NETWORK=none
 ```
+
+`CODE_AGENT_SHELL_SANDBOX=local` 是默认值；设为 `docker` 后，`run_shell` 会通过 `docker run --rm` 在一次性容器中执行，并把当前 workspace 挂载到容器的 `/workspace`。默认 `CODE_AGENT_DOCKER_NETWORK=none`，容器不能联网；如果确实需要联网，可设为 `bridge` 或其它非 `none` 值。镜像需要包含项目要用的命令，例如 Python 项目可用 `python:3.12-slim`，Node 项目可换成 `node:22-bookworm`。
 
 启动 CLI：
 

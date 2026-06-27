@@ -13,6 +13,9 @@ from code_agent.services.workspace import Workspace, WorkspaceError
 class SandboxPolicy:
     allow_network: bool = False
     inherit_environment: bool = True
+    backend: str = "local"
+    docker_image: str = "python:3.12-slim"
+    docker_workspace: str = "/workspace"
 
 
 class ShellSandbox:
@@ -78,6 +81,63 @@ class ShellSandbox:
                     resolved.relative_to(self.workspace.root)
                 except ValueError as exc:
                     raise WorkspaceError(f"Shell sandbox rejected path outside workspace: {arg}") from exc
+
+
+class DockerSandbox(ShellSandbox):
+    """Run shell commands inside a disposable Docker container.
+
+    The host workspace is mounted as the container working directory. Permission
+    rules still run before this backend, so Docker is an execution boundary, not
+    a replacement for command classification.
+    """
+
+    def run(self, argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        if not argv:
+            raise ValueError("sandbox run requires argv")
+
+        if shutil.which("docker") is None:
+            raise FileNotFoundError("找不到 docker；请先安装 Docker，或改用 CODE_AGENT_SHELL_SANDBOX=local")
+
+        self._assert_argv_paths_stay_in_workspace(argv)
+        docker_argv = self._docker_argv(argv)
+        return subprocess.run(
+            docker_argv,
+            cwd=self.workspace.root.resolve(),
+            env=self._build_env(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            shell=False,
+        )
+
+    def _docker_argv(self, argv: list[str]) -> list[str]:
+        workspace_root = str(self.workspace.root.resolve())
+        container_workspace = self.policy.docker_workspace
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--workdir",
+            container_workspace,
+            "--volume",
+            f"{workspace_root}:{container_workspace}",
+        ]
+        if not self.policy.allow_network:
+            command.extend(["--network", "none"])
+        command.append(self.policy.docker_image)
+        command.extend(argv)
+        return command
+
+
+def build_shell_sandbox(workspace: Workspace, policy: SandboxPolicy | None = None) -> ShellSandbox:
+    policy = policy or SandboxPolicy()
+    if policy.backend == "docker":
+        return DockerSandbox(workspace, policy)
+    if policy.backend == "local":
+        return ShellSandbox(workspace, policy)
+    raise ValueError(f"未知 shell sandbox backend: {policy.backend}")
 
 
 def _looks_like_option(value: str) -> bool:

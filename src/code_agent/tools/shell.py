@@ -6,15 +6,15 @@ from langchain_core.tools import tool
 
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace
-from code_agent.services.sandbox import ShellSandbox
+from code_agent.services.sandbox import SandboxPolicy, build_shell_sandbox
 from code_agent.tools.safety import approval_required, classify_command, rejected
 from code_agent.tools.schemas import RunShellInput
 
 APPROVAL_TOKEN = "approved"
 
 
-def build_run_command_tool(workspace: Workspace):
-    sandbox = ShellSandbox(workspace)
+def build_run_command_tool(workspace: Workspace, *, sandbox_policy: SandboxPolicy | None = None):
+    sandbox = build_shell_sandbox(workspace, sandbox_policy)
 
     @tool(args_schema=RunShellInput)
     def run_shell(command: str, timeout_seconds: int = 60, approval_token: str | None = None) -> str:
