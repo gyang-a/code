@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
@@ -11,7 +12,7 @@ from code_agent.graph import (
     _tool_message_for_pending,
     _tool_call_is_write,
 )
-from code_agent.main import _is_slash_command
+from code_agent.main import _is_slash_command, _parse_undo_args, _print_raw
 from code_agent.services.workspace import Workspace
 from code_agent.ui.approval import format_approval_summary
 
@@ -21,6 +22,24 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertTrue(_is_slash_command("/help"))
         self.assertTrue(_is_slash_command("  /diff"))
         self.assertFalse(_is_slash_command("explain /help"))
+
+    def test_undo_args_default_to_tracked_restore_only(self) -> None:
+        include_untracked, targets = _parse_undo_args("")
+
+        self.assertFalse(include_untracked)
+        self.assertEqual(targets, ["."])
+
+    def test_undo_args_support_include_untracked_and_path(self) -> None:
+        include_untracked, targets = _parse_undo_args('--include-untracked "src/app.py" src\\win.py')
+
+        self.assertTrue(include_untracked)
+        self.assertEqual(targets, ["src/app.py", "src\\win.py"])
+
+    def test_raw_print_disables_rich_markup_for_diff_content(self) -> None:
+        with patch("code_agent.main.console.print") as print_mock:
+            _print_raw("diff contains [/not-open]")
+
+        print_mock.assert_called_once_with("diff contains [/not-open]", markup=False, highlight=False)
 
     def test_approval_marker_must_be_first_line(self) -> None:
         content = "# Code Agent\n\nAPPROVAL_REQUIRED[level_2]: docs mention this token"

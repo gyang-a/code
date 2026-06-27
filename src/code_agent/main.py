@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shlex
 import shutil
 import subprocess
 import uuid
@@ -65,21 +66,73 @@ def _initial_state(session: Session, user_input: str) -> dict:
 
 
 def _run_git_diff(workspace: str) -> str:
+    result = _run_git_command(workspace, ["diff", "--", "."])
+    output = result.stdout if result.returncode == 0 else result.stdout + result.stderr
+    return truncate(output)
+
+
+def _run_git_command(workspace: str, args: list[str], timeout: int = 10) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(
-            ["git", "diff", "--", "."],
+        return subprocess.run(
+            ["git", *args],
             cwd=workspace,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            timeout=timeout,
             shell=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return f"ERROR: {exc}"
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(["git", *args], 127, "", f"ERROR: {exc}")
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(["git", *args], 124, exc.stdout or "", f"ERROR: {exc}")
+
+
+def _run_git_status_porcelain(workspace: str) -> str:
+    result = _run_git_command(workspace, ["status", "--porcelain", "--", "."])
     output = result.stdout if result.returncode == 0 else result.stdout + result.stderr
     return truncate(output)
+
+
+def _parse_undo_args(raw_arg: str) -> tuple[bool, list[str]]:
+    include_untracked = False
+    targets: list[str] = []
+    for raw_part in shlex.split(raw_arg, posix=False):
+        part = raw_part.strip("\"'")
+        if part == "--include-untracked":
+            include_untracked = True
+        elif part:
+            targets.append(part)
+    return include_untracked, targets or ["."]
+
+
+def _run_git_undo(workspace: str, raw_arg: str) -> str:
+    include_untracked, targets = _parse_undo_args(raw_arg)
+    restore = _run_git_command(workspace, ["restore", "--staged", "--worktree", "--", *targets], timeout=20)
+    outputs = [restore.stdout if restore.returncode == 0 else restore.stdout + restore.stderr]
+    if restore.returncode != 0:
+        return truncate("".join(outputs))
+
+    if include_untracked:
+        clean = _run_git_command(workspace, ["clean", "-fd", "--", *targets], timeout=20)
+        outputs.append(clean.stdout if clean.returncode == 0 else clean.stdout + clean.stderr)
+        if clean.returncode != 0:
+            return truncate("".join(outputs))
+
+    remaining = _run_git_status_porcelain(workspace)
+    if remaining:
+        outputs.append("\n已回滚 tracked 变更。仍有未回滚的变更：\n")
+        outputs.append(remaining)
+        if not include_untracked:
+            outputs.append("\n提示：如需删除未跟踪的新文件，使用 /undo --include-untracked。")
+    else:
+        outputs.append("已回滚工作区变更。")
+    return truncate("".join(outputs))
+
+
+def _print_raw(text: str) -> None:
+    console.print(text, markup=False, highlight=False)
 
 
 def _doctor(workspace: str) -> None:
@@ -123,10 +176,24 @@ def _handle_slash(command: str, session: Session) -> bool:
         console.print(f"模型: {session.model}")
         console.print(f"交互次数: {session.interactions}")
     elif name == "/tools":
-        console.print(describe_permission_policy())
+        _print_raw(describe_permission_policy())
     elif name == "/diff":
         diff = _run_git_diff(session.workspace)
-        console.print(diff or "当前没有 git diff。")
+        _print_raw(diff or "当前没有 git diff。")
+    elif name in {"/undo", "/revert"}:
+        status = _run_git_status_porcelain(session.workspace)
+        if not status:
+            _print_raw("当前没有可回滚的 git 工作区变更。")
+            return True
+        include_untracked, targets = _parse_undo_args(arg)
+        scope = " ".join(targets)
+        action = "回滚 tracked 文件改动并删除未跟踪文件" if include_untracked else "回滚 tracked 文件改动"
+        _print_raw(f"{action}: {scope}\n\n当前文件改动:\n{status}")
+        approved = Prompt.ask("确认回滚这些文件改动？", choices=["y", "n"], default="n")
+        if approved == "y":
+            _print_raw(_run_git_undo(session.workspace, arg))
+        else:
+            _print_raw("已取消回滚。")
     elif name == "/doctor":
         _doctor(session.workspace)
     elif name == "/usage":
@@ -220,7 +287,7 @@ def chat(
         session.tool_loops += state.values.get("iteration_count", 0)
         answer = final_answer or state.values.get("final_answer") or state.values["messages"][-1].content
         console.print("\n[bold green]Agent[/bold green]")
-        console.print(answer)
+        _print_raw(str(answer))
 
 
 def _run_graph_stream(graph, graph_input, config: dict) -> str | None:

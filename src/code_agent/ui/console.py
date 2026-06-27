@@ -27,6 +27,7 @@ def print_help() -> None:
         ("/status", "查看当前会话状态。"),
         ("/tools", "查看工具权限和 shell 风险分级规则。"),
         ("/diff", "查看当前 git diff。"),
+        ("/undo [path]", "回滚 git tracked 文件改动；加 --include-untracked 可删除新文件。"),
         ("/doctor", "检查依赖、环境变量和工作区状态。"),
         ("/usage", "查看本地交互计数。"),
         ("/mcp", "预留的 MCP 集成入口。"),

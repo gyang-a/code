@@ -61,6 +61,7 @@ python -m code_agent.main .
 - `/status` 查看当前会话状态
 - `/tools` 查看工具权限和 shell 风险分级规则
 - `/diff` 查看当前 git diff
+- `/undo [path]` 回滚 git 已跟踪文件的工作区文件改动；加 `--include-untracked` 会同时删除未跟踪的新文件
 - `/doctor` 检查本地依赖和环境变量
 - `/usage` 查看本地交互计数
 - `/mcp` 预留的 MCP 集成入口
@@ -134,6 +135,7 @@ Level 2 操作使用 LangGraph interrupt：
 ```text
 /doctor
 /tools
+/undo
 你好
 你是什么模型
 帮我解释这个项目的权限系统在哪里实现
