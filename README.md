@@ -70,20 +70,17 @@ python -m code_agent.main .
 
 ```text
 START
-  -> route_input
-      -> slash_command -> command_handler
-      -> agent
+  -> agent
+      -> execute
+      -> tool_result_router
           -> context_manager
-          -> execute
-          -> tool_result_router
-              -> observe
-              -> approval -> observe
-              -> reject -> observe
+          -> approval -> context_manager
+          -> reject -> context_manager
 ```
 
 `agent` 是唯一负责思考和决策的 LLM 节点：是否读取文件、是否制定计划、是否验证、何时停止，都由 agent 根据任务和工具结果自己决定。Graph 只提供运行外壳：每轮注入工作区、分支、git status、顶层目录、项目标记文件和 memory 等元信息，执行工具，处理审批，压缩上下文，并用最大迭代次数防止无限循环。
 
-模型永远不会直接访问文件系统。它只能调用工具层暴露的函数，而工具内部负责路径、读取窗口、输出长度、命令和敏感文件策略。`read_file` 默认只返回有限行数，Agent 需要用 `start_line` 按需继续读取。
+模型永远不会直接访问文件系统。它只能调用工具层暴露的函数，而工具内部负责路径、读取窗口、输出长度、命令和敏感文件策略。`read_file` 默认只返回有限行数，Agent 需要用 `start_line` 按需继续读取。Graph 还会限制单个 agent 回合的工具调用数量，避免一次并发读取太多文件把上下文打穿。
 写入后的验证不由 Graph 硬编码触发。Agent 自己按项目文件和报错上下文判断是否需要运行验证命令，再交给 permission rules 分级，最后由受限 `run_shell` 在 sandbox 中执行。
 
 Slash commands 由 CLI 控制面优先处理，所以 `/help`、`/diff`、`/doctor` 这类命令不需要调用 LLM。
@@ -100,7 +97,7 @@ Slash commands 由 CLI 控制面优先处理，所以 `/help`、`/diff`、`/doct
 
 项目使用 LangGraph 节点自己管理上下文压缩，而不是直接套 LangChain 总结中间件。原因是代码任务状态不只有聊天消息，还包括 `changed_files`、`test_result`、审批状态和最近文件等结构化字段。
 
-当消息数量或字符数超过阈值时，`context_manager` 会收集旧消息、工具调用、变更文件和验证结果，使用一个独立的 DeepSeek summary LLM 调用生成中文摘要。这个 summary LLM 不绑定工具，也不接收主会话完整 messages，避免压缩提示污染主 Agent 线程。压缩完成后，旧消息通过 LangGraph `RemoveMessage` 删除，只保留最近消息；摘要存入 `state.context_summary`，并在后续主 Agent LLM 调用时临时注入，不作为真实历史消息追加。
+当消息数量超过阈值，或字符量达到估算上下文窗口的 70% 时，`context_manager` 会压缩 recent 区域之外的旧消息，不会触碰最近工作消息。这个 recent 区域用于保留 Agent 刚读到的文件内容和工具观察结果，保证下一步推理仍然完整。压缩使用独立的 DeepSeek summary LLM，不绑定工具，也不接收主会话完整 messages，避免压缩提示污染主 Agent 线程。压缩时按 `AIMessage(tool_calls) + ToolMessage` 原子块移动，避免留下孤立 tool 消息。压缩完成后，旧消息通过 LangGraph `RemoveMessage` 删除；摘要存入 `state.context_summary`，并在后续主 Agent LLM 调用时临时注入，不作为真实历史消息追加。
 
 ## 权限等级
 

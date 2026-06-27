@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import subprocess
+from functools import partial
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
 from code_agent.config import AgentConfig
 from code_agent.prompts import SYSTEM_PROMPT
@@ -19,7 +19,6 @@ from code_agent.tools import (
     build_create_file_tool,
     build_delete_file_tool,
     build_find_files_tool,
-    build_get_file_tree_tool,
     build_git_diff_tool,
     build_git_status_tool,
     build_list_files_tool,
@@ -29,7 +28,6 @@ from code_agent.tools import (
     build_search_text_tool,
     build_write_file_tool,
 )
-from code_agent.tools.safety import describe_permission_policy
 
 
 def build_tools(
@@ -40,7 +38,6 @@ def build_tools(
 ):
     return [
         build_list_files_tool(workspace),
-        build_get_file_tree_tool(workspace),
         build_read_file_tool(
             workspace,
             default_max_lines=read_max_lines,
@@ -56,6 +53,48 @@ def build_tools(
         build_git_status_tool(workspace),
         build_git_diff_tool(workspace),
     ]
+
+
+def _execute_node(
+    state: AgentState,
+    *,
+    tools_by_name: dict,
+    max_tool_calls_per_turn: int,
+):
+    last_message = state["messages"][-1]
+    tool_calls = list(getattr(last_message, "tool_calls", None) or [])
+    if len(tool_calls) > max_tool_calls_per_turn:
+        return {
+            "messages": [
+                ToolMessage(
+                    content=(
+                        "TOOL_LIMIT_EXCEEDED: Too many tool calls in one assistant turn. "
+                        f"Limit is {max_tool_calls_per_turn}. "
+                        "Please continue with a smaller batch."
+                    ),
+                    tool_call_id=tool_call["id"],
+                )
+                for tool_call in tool_calls
+                if "id" in tool_call
+            ]
+        }
+
+    results = []
+    for tool_call in tool_calls:
+        tool_name = tool_call.get("name")
+        tool_call_id = tool_call.get("id")
+        args = dict(tool_call.get("args") or {})
+        if not tool_call_id:
+            continue
+        if tool_name not in tools_by_name:
+            results.append(ToolMessage(content=f"ERROR: 未知工具: {tool_name}", tool_call_id=tool_call_id))
+            continue
+        try:
+            content = str(tools_by_name[tool_name].invoke(args))
+        except Exception as exc:
+            content = f"ERROR: 工具执行失败: {exc}"
+        results.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+    return {"messages": results}
 
 
 def _git_output(workspace: Workspace, args: list[str], timeout: int = 10) -> str:
@@ -86,10 +125,6 @@ def _recent_tool_messages(state: AgentState) -> list[ToolMessage]:
         if recent:
             break
     return list(reversed(recent))
-
-
-def _should_validate(state: AgentState) -> bool:
-    return bool(state.get("did_write") or state.get("changed_files"))
 
 
 WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
@@ -137,28 +172,10 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         **llm_kwargs,
     )
     llm_with_tools = llm.bind_tools(tools)
-    tool_node = ToolNode(tools)
-
-    def route_input(state: AgentState):
-        user_goal = state["user_goal"].strip()
-        return {"input_kind": "slash_command" if user_goal.startswith("/") else "agent"}
-
-    def command_handler(state: AgentState):
-        command = state["user_goal"].strip().split(maxsplit=1)[0]
-        if command == "/help":
-            answer = "可用 slash commands: /help, /clear, /model, /status, /tools, /diff, /doctor, /usage, /mcp, /exit。"
-        elif command == "/diff":
-            answer = _git_output(workspace, ["diff", "--", "."], timeout=20) or "当前没有 git diff。"
-        elif command == "/tools":
-            answer = describe_permission_policy()
-        else:
-            answer = f"Slash command {command} 已由 CLI 控制层处理。"
-        return {"final_answer": answer}
-
-    def route_after_input_for_graph(state: AgentState) -> str:
-        if state["user_goal"].strip().startswith("/"):
-            return "command_handler"
-        return "agent"
+    compaction_char_limit = min(
+        agent_config.context_char_limit,
+        int(agent_config.context_window_chars * agent_config.context_compaction_ratio),
+    )
 
     def agent_node(state: AgentState):
         iteration_count = state.get("iteration_count", 0) + 1
@@ -167,7 +184,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
                 "iteration_count": iteration_count,
                 "final_answer": "已停止：Agent 达到最大工具循环次数。",
             }
-        response = llm_with_tools.invoke(_messages_for_agent(state, workspace))
+        response = llm_with_tools.invoke(_messages_for_agent(state, workspace, agent_config.max_tool_calls_per_turn))
         update = {"messages": [response], "iteration_count": iteration_count}
         if not getattr(response, "tool_calls", None):
             update["final_answer"] = response.content
@@ -180,7 +197,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         if not should_compact_messages(
             messages,
             max_messages=agent_config.context_message_limit,
-            max_chars=agent_config.context_char_limit,
+            max_chars=compaction_char_limit,
         ):
             return {}
 
@@ -276,7 +293,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             return "approval"
         if state.get("rejected_reason"):
             return "reject"
-        return "observe"
+        return "context_manager"
 
     def approval_node(state: AgentState):
         reason = state.get("approval_reason") or "该操作需要确认。"
@@ -337,9 +354,6 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             "rejected_reason": None,
         }
 
-    def observe_node(state: AgentState):
-        return {}
-
     def should_continue(state: AgentState):
         if state.get("final_answer"):
             return END
@@ -355,26 +369,21 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         return should_continue(state)
 
     graph = StateGraph(AgentState)
-    graph.add_node("route_input", route_input)
-    graph.add_node("command_handler", command_handler)
     graph.add_node("agent", agent_node)
     graph.add_node("context_manager", context_manager)
-    graph.add_node("execute", tool_node)
+    graph.add_node(
+        "execute",
+        partial(
+            _execute_node,
+            tools_by_name=tools_by_name,
+            max_tool_calls_per_turn=agent_config.max_tool_calls_per_turn,
+        ),
+    )
     graph.add_node("tool_result_router", tool_result_router)
     graph.add_node("approval", approval_node)
     graph.add_node("reject", reject_node)
-    graph.add_node("observe", observe_node)
 
-    graph.add_edge(START, "route_input")
-    graph.add_conditional_edges(
-        "route_input",
-        route_after_input_for_graph,
-        {
-            "command_handler": "command_handler",
-            "agent": "agent",
-        },
-    )
-    graph.add_edge("command_handler", END)
+    graph.add_edge(START, "agent")
     graph.add_conditional_edges(
         "agent",
         after_agent,
@@ -390,12 +399,11 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         {
             "approval": "approval",
             "reject": "reject",
-            "observe": "observe",
+            "context_manager": "context_manager",
         },
     )
-    graph.add_edge("approval", "observe")
-    graph.add_edge("reject", "observe")
-    graph.add_edge("observe", "context_manager")
+    graph.add_edge("approval", "context_manager")
+    graph.add_edge("reject", "context_manager")
     graph.add_conditional_edges(
         "context_manager",
         route_after_context,
@@ -416,21 +424,9 @@ def _changed_files_from_git(workspace: Workspace) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def _summarize_diff(changed_files: list[str], diff: str) -> str:
-    if not changed_files and not diff:
-        return "当前没有 git diff。"
-    file_summary = ", ".join(changed_files) if changed_files else "没有已跟踪文件的 diff。"
-    line_count = len(diff.splitlines()) if diff else 0
-    return f"变更文件: {file_summary}。Diff 行数: {line_count}。"
-
-
-def _messages_for_agent(state: AgentState, workspace: Workspace) -> list:
-    messages = _messages_with_context_summary(state)
-    system_message = SystemMessage(content=SYSTEM_PROMPT)
-    if messages and messages[0].type == "system":
-        prepared = list(messages)
-    else:
-        prepared = [system_message, *messages]
+def _messages_for_agent(state: AgentState, workspace: Workspace, max_tool_calls_per_turn: int = 2) -> list:
+    messages = _messages_for_llm_with_context_summary(state)
+    prepared = _with_single_base_system_prompt(messages)
 
     runtime_message = SystemMessage(
         content=(
@@ -440,6 +436,8 @@ def _messages_for_agent(state: AgentState, workspace: Workspace) -> list:
             f"{build_turn_metadata(workspace)}\n\n"
             "Operational constraints:\n"
             "- You are the agent node: choose whether to inspect, edit, validate, or answer.\n"
+            f"- Use at most {max_tool_calls_per_turn} tool calls per turn; inspect in small batches.\n"
+            "- Do not read README or list trees just to orient yourself; use host metadata first.\n"
             "- read_file returns a bounded line window by default; request later start_line values as needed.\n"
             "- If you changed files, decide whether a focused validation command is useful before final answer.\n"
             "- Stop and answer when the task is complete; the host enforces a max tool-iteration limit."
@@ -449,7 +447,16 @@ def _messages_for_agent(state: AgentState, workspace: Workspace) -> list:
     return [*prepared[:insert_at], runtime_message, *prepared[insert_at:]]
 
 
-def _messages_with_context_summary(state: AgentState) -> list:
+def _with_single_base_system_prompt(messages: list) -> list:
+    non_base_messages = [
+        message
+        for message in messages
+        if not (message.type == "system" and message.content == SYSTEM_PROMPT)
+    ]
+    return [SystemMessage(content=SYSTEM_PROMPT), *non_base_messages]
+
+
+def _messages_for_llm_with_context_summary(state: AgentState) -> list:
     messages = list(state["messages"])
     summary = state.get("context_summary")
     if not summary:
@@ -549,30 +556,6 @@ def _generate_context_summary(llm, compaction_material: str) -> str:
         return truncate(str(response.content), 8000)
     except Exception:
         return truncate(compaction_material, 8000)
-
-
-def _parse_plan_lines(raw_plan: str) -> list[str]:
-    steps: list[str] = []
-    for raw_line in raw_plan.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        line = line.lstrip("-* ")
-        line = line.lstrip("0123456789.、)） ")
-        line = line.strip()
-        if line:
-            steps.append(line)
-        if len(steps) >= 6:
-            break
-    return steps
-
-
-def _normalize_intent_label(raw_label: str) -> str:
-    label = raw_label.strip().lower().split()[0] if raw_label.strip() else "code_task"
-    label = label.strip("`'\".,:;")
-    if label in {"casual_chat", "general_question", "code_task"}:
-        return label
-    return "code_task"
 
 
 def _recent_tool_calls_by_id(state: AgentState) -> dict[str, dict]:

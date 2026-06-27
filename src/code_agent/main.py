@@ -45,27 +45,20 @@ def _initial_state(session: Session, user_input: str) -> dict:
         "messages": [HumanMessage(content=user_input)],
         "workspace": session.workspace,
         "user_goal": user_input,
-        "input_kind": None,
-        "project_context": None,
         "context_summary": None,
         "recent_files": [],
         "compaction_count": 0,
-        "plan": [],
-        "current_step": None,
         "iteration_count": 0,
         "max_iterations": DEFAULT_MAX_ITERATIONS,
         "changed_files": [],
         "did_write": False,
-        "last_diff": None,
         "test_command": None,
         "test_result": None,
-        "validation_requested": False,
         "needs_approval": False,
         "approval_reason": None,
         "pending_approval": None,
         "rejected_reason": None,
         "tool_errors": [],
-        "diff_summary": None,
         "final_answer": None,
     }
 
@@ -146,6 +139,10 @@ def _handle_slash(command: str, session: Session) -> bool:
     return True
 
 
+def _is_slash_command(user_input: str) -> bool:
+    return user_input.lstrip().startswith("/")
+
+
 @app.command()
 def chat(
     workspace: str = typer.Argument(".", help="代码智能体使用的工作区目录。"),
@@ -176,7 +173,7 @@ def chat(
         if not user_input:
             continue
 
-        if user_input.startswith("/"):
+        if _is_slash_command(user_input):
             if not _handle_slash(user_input, session):
                 break
             continue

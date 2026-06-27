@@ -100,20 +100,59 @@ def build_context_summary(
     return truncate("\n\n".join(sections), max_chars)
 
 
-def _split_messages(messages: list[BaseMessage], *, keep_recent: int) -> tuple[list[BaseMessage], list[BaseMessage]]:
-    retained_recent = messages[-keep_recent:]
-    retained_ids = {id(message) for message in retained_recent}
-    removable = [
-        message
-        for message in messages
-        if id(message) not in retained_ids and _can_remove_message(message)
-    ]
-    retained = [
-        message
-        for message in messages
-        if not _can_remove_message(message) or id(message) in retained_ids
-    ]
+def _split_messages(
+    messages: list[BaseMessage],
+    *,
+    keep_recent: int,
+) -> tuple[list[BaseMessage], list[BaseMessage]]:
+    blocks = _message_blocks(messages)
+    retained_block_ids: set[int] = set()
+    retained_count = 0
+    for block in reversed(blocks):
+        if retained_count >= keep_recent:
+            break
+        retained_block_ids.add(id(block))
+        retained_count += len(block)
+
+    removable: list[BaseMessage] = []
+    retained: list[BaseMessage] = []
+    for block in blocks:
+        if id(block) in retained_block_ids or not all(_can_remove_message(message) for message in block):
+            retained.extend(block)
+        else:
+            removable.extend(block)
     return removable, retained
+
+
+def _message_blocks(messages: list[BaseMessage]) -> list[list[BaseMessage]]:
+    blocks: list[list[BaseMessage]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if message.type != "ai" or not tool_calls:
+            blocks.append([message])
+            index += 1
+            continue
+
+        expected_tool_call_ids = {
+            str(tool_call["id"])
+            for tool_call in tool_calls
+            if tool_call.get("id")
+        }
+        block = [message]
+        index += 1
+        while index < len(messages):
+            next_message = messages[index]
+            if next_message.type != "tool":
+                break
+            tool_call_id = str(getattr(next_message, "tool_call_id", ""))
+            if expected_tool_call_ids and tool_call_id not in expected_tool_call_ids:
+                break
+            block.append(next_message)
+            index += 1
+        blocks.append(block)
+    return blocks
 
 
 def _can_remove_message(message: BaseMessage) -> bool:

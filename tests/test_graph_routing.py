@@ -2,41 +2,30 @@ from __future__ import annotations
 
 import unittest
 
+from langchain_core.messages import AIMessage
+
 from code_agent.graph import (
+    build_tools,
+    _execute_node,
     _first_line,
-    _normalize_intent_label,
-    _parse_plan_lines,
-    _should_validate,
     _tool_message_for_pending,
     _tool_call_is_write,
 )
+from code_agent.main import _is_slash_command
+from code_agent.services.workspace import Workspace
 
 
 class GraphRoutingTests(unittest.TestCase):
-    def test_intent_label_normalization(self) -> None:
-        self.assertEqual(_normalize_intent_label("casual_chat"), "casual_chat")
-        self.assertEqual(_normalize_intent_label("general_question\n"), "general_question")
-        self.assertEqual(_normalize_intent_label("`code_task`"), "code_task")
-        self.assertEqual(_normalize_intent_label("something weird"), "code_task")
+    def test_slash_commands_are_identified_before_graph_execution(self) -> None:
+        self.assertTrue(_is_slash_command("/help"))
+        self.assertTrue(_is_slash_command("  /diff"))
+        self.assertFalse(_is_slash_command("explain /help"))
 
     def test_approval_marker_must_be_first_line(self) -> None:
         content = "# Code Agent\n\nAPPROVAL_REQUIRED[level_2]: docs mention this token"
 
         self.assertEqual(_first_line(content), "# Code Agent")
         self.assertFalse(_first_line(content).startswith("APPROVAL_REQUIRED[level_2]"))
-
-    def test_parse_plan_lines(self) -> None:
-        raw_plan = "1. 读取 README 了解项目\n- 搜索权限相关代码\n3）总结实现方式"
-
-        self.assertEqual(
-            _parse_plan_lines(raw_plan),
-            ["读取 README 了解项目", "搜索权限相关代码", "总结实现方式"],
-        )
-
-    def test_validation_depends_on_current_turn_writes(self) -> None:
-        self.assertFalse(_should_validate({"did_write": False, "changed_files": []}))
-        self.assertTrue(_should_validate({"did_write": True, "changed_files": []}))
-        self.assertTrue(_should_validate({"did_write": False, "changed_files": ["src/app.py"]}))
 
     def test_write_detection_depends_on_tool_name_not_file_content(self) -> None:
         self.assertTrue(_tool_call_is_write({"name": "patch_file", "args": {"path": "src/app.py"}}))
@@ -55,3 +44,66 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertEqual(message.type, "tool")
         self.assertEqual(message.tool_call_id, "call_1")
         self.assertEqual(message.id, "tool-msg-1")
+
+    def test_execute_node_is_independently_testable(self) -> None:
+        tool = FakeTool("echo_tool", "ok")
+        state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "echo_tool",
+                            "args": {"value": "hello"},
+                            "id": "call_1",
+                        }
+                    ],
+                )
+            ]
+        }
+
+        update = _execute_node(state, tools_by_name={"echo_tool": tool}, max_tool_calls_per_turn=2)
+
+        self.assertEqual(tool.calls, [{"value": "hello"}])
+        self.assertEqual(update["messages"][0].type, "tool")
+        self.assertEqual(update["messages"][0].content, "ok")
+        self.assertEqual(update["messages"][0].tool_call_id, "call_1")
+
+    def test_execute_node_enforces_tool_call_limit(self) -> None:
+        state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "one", "args": {}, "id": "call_1"},
+                        {"name": "two", "args": {}, "id": "call_2"},
+                    ],
+                )
+            ]
+        }
+
+        update = _execute_node(state, tools_by_name={}, max_tool_calls_per_turn=1)
+
+        self.assertEqual(len(update["messages"]), 2)
+        self.assertTrue(all(message.content.startswith("TOOL_LIMIT_EXCEEDED") for message in update["messages"]))
+
+    def test_agent_toolset_does_not_expose_file_tree(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tool_names = {tool.name for tool in build_tools(Workspace(tmp))}
+
+        self.assertIn("list_files", tool_names)
+        self.assertIn("find_files", tool_names)
+        self.assertNotIn("get_file_tree", tool_names)
+
+
+class FakeTool:
+    def __init__(self, name: str, response: str) -> None:
+        self.name = name
+        self.response = response
+        self.calls = []
+
+    def invoke(self, args):
+        self.calls.append(args)
+        return self.response

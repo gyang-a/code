@@ -10,15 +10,12 @@ from code_agent.ui.console import console
 
 
 NODE_LABELS = {
-    "route_input": "已路由输入",
-    "command_handler": "已处理 slash command",
     "agent": "Agent 正在思考",
     "context_manager": "已压缩历史上下文",
     "execute": "已执行工具调用",
     "tool_result_router": "已分类工具结果",
     "approval": "等待审批",
     "reject": "已处理拒绝操作",
-    "observe": "已观察结果",
 }
 
 
@@ -66,9 +63,6 @@ def _render_node_update(node_name: str, update: Mapping[str, Any]) -> None:
     if update.get("test_result"):
         first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "验证完成"
         console.print(f"[dim]  {first_line}[/dim]")
-
-    if update.get("diff_summary"):
-        console.print(f"[dim]  {update['diff_summary']}[/dim]")
 
     if update.get("compaction_count"):
         console.print(f"[dim]  上下文压缩次数: {update['compaction_count']}[/dim]")
