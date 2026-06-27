@@ -56,8 +56,14 @@ class DeleteFileInput(BaseModel):
 
 
 class RunShellInput(BaseModel):
-    command: str = Field(description="Shell command to run inside the workspace sandbox.")
-    timeout_seconds: int = Field(default=60, ge=1, le=180, description="Command timeout in seconds.")
+    command: str = Field(
+        description=(
+            "Shell command to run inside the workspace sandbox. Use only for tests, builds, "
+            "package installs/scaffolding, or short temporary scripts; do not use for file "
+            "listing, reading, searching, diffing, editing, or deleting."
+        )
+    )
+    timeout_seconds: int = Field(default=180, ge=1, le=180, description="Command timeout in seconds.")
 
 
 class GitDiffInput(BaseModel):

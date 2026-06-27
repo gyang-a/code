@@ -13,8 +13,10 @@ from code_agent.ui.console import console
 
 NODE_LABELS = {
     "agent": "Agent is thinking",
-    "context_manager": "Compacted conversation context",
+    "model": "Agent is thinking",
+    "middleware": "Updated agent context",
     "execute": "Handled tool calls",
+    "tools": "Handled tool calls",
     "tool_result_router": "Processed tool results",
 }
 
@@ -24,8 +26,6 @@ def render_stream_chunk(chunk: Mapping[str, Any]) -> None:
         return
 
     for node_name, update in chunk.items():
-        if node_name == "context_manager" and not _context_update_compacted(update):
-            continue
         label = NODE_LABELS.get(node_name, node_name)
         console.print(f"[dim]> {label}[/dim]")
         if isinstance(update, Mapping):
@@ -44,7 +44,26 @@ def interrupt_from_chunk(chunk: Mapping[str, Any]) -> dict[str, Any] | None:
     if not interrupts:
         return None
     value = interrupts[0].value
-    return value if isinstance(value, dict) else {"reason": str(value)}
+    if isinstance(value, Mapping):
+        return dict(value)
+    action_requests = getattr(value, "action_requests", None)
+    review_configs = getattr(value, "review_configs", None)
+    if action_requests is not None or review_configs is not None:
+        return {
+            "action_requests": [_as_dict(item) for item in action_requests or []],
+            "review_configs": [_as_dict(item) for item in review_configs or []],
+        }
+    return {"reason": str(value)}
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    data: dict[str, Any] = {}
+    for key in ("name", "args", "description", "action_name", "allowed_decisions"):
+        if hasattr(value, key):
+            data[key] = getattr(value, key)
+    return data
 
 
 def _render_node_update(update: Mapping[str, Any]) -> None:
@@ -58,14 +77,6 @@ def _render_node_update(update: Mapping[str, Any]) -> None:
     if update.get("test_result"):
         first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "validation complete"
         console.print(f"[dim]  {escape(first_line)}[/dim]")
-
-    if update.get("compaction_count"):
-        console.print(f"[dim]  compaction count: {update['compaction_count']}[/dim]")
-
-
-def _context_update_compacted(update: Any) -> bool:
-    return isinstance(update, Mapping) and bool(update.get("compaction_count"))
-
 
 def _render_messages(messages: list[BaseMessage]) -> None:
     for message in messages:

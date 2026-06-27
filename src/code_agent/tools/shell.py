@@ -15,8 +15,8 @@ def build_run_command_tool(workspace: Workspace, *, sandbox_policy: SandboxPolic
     sandbox = build_shell_sandbox(workspace, sandbox_policy)
 
     @tool(args_schema=RunShellInput)
-    def run_shell(command: str, timeout_seconds: int = 60) -> str:
-        """Run a shell command in the workspace sandbox."""
+    def run_shell(command: str, timeout_seconds: int = 180) -> str:
+        """Run tests, builds, installs, scaffolding, or temporary scripts in the sandbox."""
         decision, argv = classify_command(command, workspace)
         if decision.risk.value == "level_3":
             return rejected(decision.risk, decision.reason)

@@ -14,7 +14,7 @@ import typer
 from langgraph.types import Command
 from rich.prompt import Prompt
 
-from code_agent.config import AgentConfig, DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL
+from code_agent.config import AgentConfig, DEFAULT_MODEL
 from code_agent.services.env import load_dotenv
 from code_agent.services.sandbox import SandboxPolicy, describe_sandbox_policy
 from code_agent.services.summarizer import truncate
@@ -49,11 +49,6 @@ def _initial_state(session: Session, user_input: str) -> dict:
         "messages": [HumanMessage(content=user_input)],
         "workspace": session.workspace,
         "user_goal": user_input,
-        "context_summary": None,
-        "recent_files": [],
-        "compaction_count": 0,
-        "iteration_count": 0,
-        "max_iterations": DEFAULT_MAX_ITERATIONS,
         "changed_files": [],
         "did_write": False,
         "test_command": None,
@@ -233,6 +228,12 @@ def _prompt_approval_decisions(interrupt_value: Any) -> list[dict[str, Any]]:
         reason = str(action.get("description") or action.get("reason") or "This action requires approval.")
         summary = format_approval_summary(action, reason)
         console.print(f"\n[bold yellow]Approval required[/bold yellow] [{index}/{len(action_requests)}] {summary}")
+        if action.get("name") in {"run_shell", "run_command"} or action.get("tool") in {"run_shell", "run_command"}:
+            console.print(
+                "[yellow]  This approves the entire shell command. "
+                "Package downloads, scaffolding, and child commands inside it will not prompt separately. "
+                "File inspection/editing should use dedicated tools, not shell.[/yellow]"
+            )
         approved = Prompt.ask("Approve this action?", choices=["y", "n"], default="n")
         if approved == "y":
             decisions.append({"type": "approve"})
@@ -307,13 +308,18 @@ def chat(
                     final_answer = values.get("final_answer") or values["messages"][-1].content
                     break
                 decisions = _prompt_approval_decisions(interrupts[0].value)
+                if any(decision.get("type") in {"approve", "edit"} for decision in decisions):
+                    console.print(
+                        "[dim]Executing approved action(s). "
+                        "Long-running shell output is captured and shown when the tool finishes.[/dim]"
+                    )
                 final_answer = _run_graph_stream(graph, Command(resume={"decisions": decisions}), config)
         except Exception as exc:
             console.print(f"[red]Agent error:[/red] {exc}")
             continue
 
         state = graph.get_state(config)
-        session.tool_loops += state.values.get("iteration_count", 0)
+        session.tool_loops += state.values.get("run_model_call_count", 0)
         answer = final_answer or state.values.get("final_answer") or state.values["messages"][-1].content
         console.print("\n[bold green]Agent[/bold green]")
         _print_raw(str(answer))

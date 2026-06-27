@@ -4,14 +4,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage
+from langchain.agents.middleware import ModelRequest
+from langchain_core.messages import SystemMessage
 
 from code_agent.graph import (
-    _approval_interrupt_payload,
-    _execute_node,
-    _first_line,
-    _normalize_approval_decisions,
-    _tool_call_is_write,
+    RuntimeMetadataMiddleware,
+    _approval_interrupt_config,
     build_tools,
 )
 from code_agent.main import _is_slash_command, _parse_undo_args, _print_raw
@@ -45,44 +43,10 @@ class GraphRoutingTests(unittest.TestCase):
 
         print_mock.assert_called_once_with("diff contains [/not-open]", markup=False, highlight=False)
 
-    def test_first_line_returns_first_content_line(self) -> None:
-        content = "# Code Agent\n\nlater content"
-
-        self.assertEqual(_first_line(content), "# Code Agent")
-        self.assertFalse(_first_line(content).startswith("later"))
-
-    def test_write_detection_depends_on_tool_name_not_file_content(self) -> None:
-        self.assertTrue(_tool_call_is_write({"name": "patch_file", "args": {"path": "src/app.py"}}))
-        self.assertTrue(_tool_call_is_write({"name": "create_file", "args": {"path": "tests/test_app.py"}}))
-        self.assertTrue(_tool_call_is_write({"name": "delete_file", "args": {"path": "old.py"}}))
-        self.assertFalse(_tool_call_is_write({"name": "read_file", "args": {"path": "src/tools/fs.py"}}))
-        self.assertFalse(_tool_call_is_write({"name": "run_shell", "args": {"command": "python -m pytest"}}))
-        self.assertTrue(_tool_call_is_write({"name": "run_shell", "args": {"command": "npm install"}}))
-
-    def test_approval_interrupt_payload_groups_all_action_requests(self) -> None:
-        payload = _approval_interrupt_payload(
-            [
-                {"name": "tool_a", "tool_call_id": "call_1", "args": {}, "reason": "one"},
-                {"name": "tool_b", "tool_call_id": "call_2", "args": {}, "reason": "two"},
-            ]
-        )
-
-        self.assertEqual([request["tool_call_id"] for request in payload["action_requests"]], ["call_1", "call_2"])
-        self.assertEqual(len(payload["review_configs"]), 2)
-        self.assertIn("approve", payload["review_configs"][0]["allowed_decisions"])
-
-    def test_resume_decisions_are_normalized_per_action_request(self) -> None:
-        decisions = _normalize_approval_decisions(
-            {"decisions": [{"type": "approve"}, {"type": "reject", "message": "no"}]},
-            expected_count=2,
-        )
-
-        self.assertEqual(decisions, [{"type": "approve"}, {"type": "reject", "message": "no"}])
-
-    def test_approval_summary_keeps_multiline_shell_command_to_one_line(self) -> None:
+    def test_approval_summary_accepts_official_action_request_shape(self) -> None:
         summary = format_approval_summary(
             {
-                "tool": "run_shell",
+                "name": "run_shell",
                 "args": {
                     "command": 'python -c "\nprint(1)\nprint(2)\n"',
                 },
@@ -125,55 +89,6 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertNotIn("ALLOWED[", result)
         self.assertNotIn("requires approval", result.lower())
 
-    def test_execute_node_is_independently_testable(self) -> None:
-        tool = FakeTool("list_files", "ok")
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "list_files",
-                            "args": {"value": "hello"},
-                            "id": "call_1",
-                        }
-                    ],
-                )
-            ]
-        }
-
-        with tempfile.TemporaryDirectory() as tmp:
-            update = _execute_node(
-                state,
-                workspace=Workspace(tmp),
-                tools_by_name={"list_files": tool},
-                max_tool_calls_per_turn=2,
-            )
-
-        self.assertEqual(tool.calls, [{"value": "hello"}])
-        self.assertEqual(update["messages"][0].type, "tool")
-        self.assertEqual(update["messages"][0].content, "ok")
-        self.assertEqual(update["messages"][0].tool_call_id, "call_1")
-
-    def test_execute_node_enforces_tool_call_limit(self) -> None:
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {"name": "one", "args": {}, "id": "call_1"},
-                        {"name": "two", "args": {}, "id": "call_2"},
-                    ],
-                )
-            ]
-        }
-
-        with tempfile.TemporaryDirectory() as tmp:
-            update = _execute_node(state, workspace=Workspace(tmp), tools_by_name={}, max_tool_calls_per_turn=1)
-
-        self.assertEqual(len(update["messages"]), 2)
-        self.assertTrue(all(message.content.startswith("TOOL_LIMIT_EXCEEDED") for message in update["messages"]))
-
     def test_agent_toolset_does_not_expose_file_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tool_names = {tool.name for tool in build_tools(Workspace(tmp))}
@@ -197,59 +112,55 @@ class GraphRoutingTests(unittest.TestCase):
         internal_token_field = "approval" + "_token"
         self.assertNotIn(internal_token_field, shell_schema["properties"])
 
-    def test_execute_node_interrupts_once_for_multiple_approval_decisions(self) -> None:
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {"name": "custom_a", "args": {"value": "a"}, "id": "call_a"},
-                        {"name": "custom_b", "args": {"value": "b"}, "id": "call_b"},
-                        {"name": "custom_c", "args": {"value": "c"}, "id": "call_c"},
-                    ],
-                )
-            ]
-        }
-        tools = {
-            "custom_a": FakeTool("custom_a", "result a"),
-            "custom_b": FakeTool("custom_b", "result b"),
-            "custom_c": FakeTool("custom_c", "result c"),
-        }
-
+    def test_human_in_the_loop_config_uses_permission_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with patch(
-                "code_agent.graph.interrupt",
-                return_value={
-                    "decisions": [
-                        {"type": "approve"},
-                        {"type": "reject", "message": "do not run b"},
-                        {"type": "approve"},
-                    ]
-                },
-            ) as interrupt_mock:
-                update = _execute_node(
-                    state,
-                    workspace=Workspace(tmp),
-                    tools_by_name=tools,
-                    max_tool_calls_per_turn=3,
+            workspace = Workspace(tmp)
+            tools = build_tools(workspace)
+            config = _approval_interrupt_config(workspace, tools)
+
+            self.assertFalse(
+                config["read_file"]["when"](
+                    FakeToolCallRequest("read_file", {"path": "README.md"})
                 )
+            )
+            self.assertTrue(
+                config["patch_file"]["when"](
+                    FakeToolCallRequest("patch_file", {"path": "package.json"})
+                )
+            )
+            self.assertIn(
+                "package.json",
+                config["patch_file"]["description"](
+                    {"name": "patch_file", "args": {"path": "package.json"}},
+                    {},
+                    None,
+                ),
+            )
 
-        interrupt_mock.assert_called_once()
-        payload = interrupt_mock.call_args.args[0]
-        self.assertEqual([request["tool_call_id"] for request in payload["action_requests"]], ["call_a", "call_b", "call_c"])
-        self.assertEqual([message.tool_call_id for message in update["messages"]], ["call_a", "call_b", "call_c"])
-        self.assertEqual([message.content for message in update["messages"]], ["result a", "do not run b", "result c"])
-        self.assertEqual(tools["custom_a"].calls, [{"value": "a"}])
-        self.assertEqual(tools["custom_b"].calls, [])
-        self.assertEqual(tools["custom_c"].calls, [{"value": "c"}])
+    def test_runtime_metadata_middleware_injects_system_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            middleware = RuntimeMetadataMiddleware(
+                workspace=Workspace(tmp),
+                shell_sandbox="local",
+                max_tool_calls_per_turn=3,
+            )
+            request = ModelRequest(
+                model=object(),
+                messages=[],
+                system_message=SystemMessage(content="base"),
+            )
+
+            def handler(updated_request):
+                return updated_request.system_message.content
+
+            content = middleware.wrap_model_call(request, handler)
+
+        self.assertIn("base", content)
+        self.assertIn("Runtime metadata:", content)
+        self.assertIn("Shell sandbox: local.", content)
 
 
-class FakeTool:
-    def __init__(self, name: str, response: str) -> None:
-        self.name = name
-        self.response = response
-        self.calls = []
+class FakeToolCallRequest:
+    def __init__(self, name: str, args: dict) -> None:
+        self.tool_call = {"name": name, "args": args, "id": "call_1"}
 
-    def invoke(self, args):
-        self.calls.append(args)
-        return self.response

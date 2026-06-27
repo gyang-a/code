@@ -57,10 +57,12 @@ class Workspace:
     def is_excluded(self, path: str | Path) -> bool:
         resolved = self.resolve(path)
         rel = self.relative(resolved)
-        return any(fnmatch.fnmatch(rel, pattern) for pattern in self.exclude_globs)
+        return any(_matches_exclude_glob(rel, pattern) for pattern in self.exclude_globs)
 
     def is_sensitive(self, path: str | Path) -> bool:
         resolved = self.resolve(path)
+        if self.is_excluded(resolved):
+            raise WorkspaceError(f"Refusing to read excluded path: {self.relative(resolved)}")
         name = resolved.name.lower()
         parts = {part.lower() for part in resolved.parts}
         return (

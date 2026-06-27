@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +25,39 @@ LEVEL_3_COMMAND_MARKERS = (
 LEVEL_2_COMMAND_PREFIXES = (
     "npm install",
     "npm i",
+    "npm create",
+    "npm exec",
+    "npx",
     "pnpm add",
     "pnpm install",
+    "pnpm create",
+    "pnpm dlx",
     "yarn add",
     "yarn install",
+    "yarn create",
+    "yarn dlx",
     "pip install",
     "python -m pip install",
     "uv add",
     "uv pip install",
     "docker compose up",
     "docker-compose up",
+)
+
+DEV_SERVER_COMMAND_PREFIXES = (
+    "npm run dev",
+    "npm run start",
+    "npm start",
+    "pnpm dev",
+    "pnpm run dev",
+    "pnpm start",
+    "yarn dev",
+    "yarn start",
+    "vite",
+    "next dev",
+    "python -m http.server",
+    "flask run",
+    "uvicorn",
 )
 
 LEVEL_1_COMMAND_ROOTS = {
@@ -46,29 +71,59 @@ LEVEL_1_COMMAND_ROOTS = {
     "python",
     "node",
     "git",
-    "rg",
-    "grep",
-    "ls",
-    "dir",
-    "pwd",
-    "cat",
-    "type",
 }
 
 LEVEL_1_COMMAND_PATTERNS = (
     ("npm", "test"),
-    ("npm", "run"),
+    ("npm", "run", "build"),
+    ("npm", "run", "test"),
+    ("npm", "run", "lint"),
+    ("npm", "run", "typecheck"),
+    ("npm", "run", "check"),
     ("pnpm", "test"),
+    ("pnpm", "run", "test"),
     ("pnpm", "lint"),
+    ("pnpm", "run", "lint"),
     ("pnpm", "build"),
+    ("pnpm", "run", "build"),
     ("yarn", "test"),
+    ("yarn", "run", "test"),
     ("yarn", "lint"),
+    ("yarn", "run", "lint"),
     ("yarn", "build"),
+    ("yarn", "run", "build"),
     ("uv", "run"),
     ("python", "-m"),
     ("git", "status"),
     ("git", "diff"),
 )
+
+SHELL_FILESYSTEM_COMMAND_ROOTS = {
+    "cat",
+    "copy",
+    "cp",
+    "del",
+    "dir",
+    "erase",
+    "find",
+    "findstr",
+    "grep",
+    "ls",
+    "md",
+    "mkdir",
+    "more",
+    "move",
+    "mv",
+    "rd",
+    "ren",
+    "rename",
+    "rg",
+    "rm",
+    "rmdir",
+    "touch",
+    "type",
+    "xcopy",
+}
 
 READ_ONLY_TOOLS = {
     "list_files",
@@ -91,10 +146,11 @@ def describe_permission_policy() -> str:
     return "\n".join(
         [
             "Permission rules:",
-            "- Level 0: 只读工具直接允许，例如 read_file/search_text/git_diff。",
-            "- Level 1: 低风险编辑或常见测试/构建/查看命令，直接在 sandbox 中执行。",
-            "- Level 2: 安装依赖、Docker、删除文件、未知 shell 命令等，需要用户确认。",
-            "- Level 3: rm -rf、sudo、chmod 777、curl | bash、git reset --hard、访问 .env/.ssh，直接拒绝。",
+            "- Level 0: read-only workspace tools are allowed.",
+            "- Level 1: low-risk validation/build/test commands are allowed in the sandbox.",
+            "- Level 2: package installs, scaffolding, Docker Compose, deletes, and unknown shell commands require approval.",
+            "- Level 3: destructive commands, sensitive paths, and shell-based file inspection/editing are rejected.",
+            "- Use dedicated tools for listing, reading, searching, diffing, creating, editing, or deleting files.",
         ]
     )
 
@@ -108,12 +164,12 @@ def classify_tool_call(workspace: Workspace, tool_name: str, args: dict[str, Any
                 return PermissionDecision(
                     risk=RiskLevel.level_3,
                     allowed=False,
-                    reason=f"{tool_name} 拒绝访问敏感路径: {workspace.relative(resolved)}",
+                    reason=f"{tool_name} rejected sensitive path: {workspace.relative(resolved)}",
                 )
         return PermissionDecision(
             risk=RiskLevel.level_0,
             allowed=True,
-            reason=f"{tool_name} 是只读工具，直接允许。",
+            reason=f"{tool_name} is a read-only workspace tool.",
         )
 
     if tool_name in WRITE_TOOLS:
@@ -122,7 +178,7 @@ def classify_tool_call(workspace: Workspace, tool_name: str, args: dict[str, Any
             return PermissionDecision(
                 risk=RiskLevel.level_3,
                 allowed=False,
-                reason=f"{tool_name} 缺少 path 参数，拒绝执行。",
+                reason=f"{tool_name} is missing required path argument.",
             )
         return classify_file_operation(workspace, tool_name, path)
 
@@ -135,7 +191,7 @@ def classify_tool_call(workspace: Workspace, tool_name: str, args: dict[str, Any
         risk=RiskLevel.level_2,
         allowed=False,
         requires_approval=True,
-        reason=f"未知工具需要确认: {tool_name}",
+        reason=f"Unknown tool requires approval: {tool_name}",
     )
 
 
@@ -149,7 +205,7 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
         return PermissionDecision(
             risk=RiskLevel.level_3,
             allowed=False,
-            reason=f"{operation} 拒绝访问敏感路径: {normalized}",
+            reason=f"{operation} rejected sensitive path: {normalized}",
         )
 
     if operation == "delete_file":
@@ -157,7 +213,7 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"删除文件需要确认: {normalized}",
+            reason=f"Deleting files requires approval: {normalized}",
         )
 
     if name in LEVEL_2_FILES:
@@ -165,7 +221,7 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"修改 {normalized} 需要确认。",
+            reason=f"Modifying {normalized} requires approval.",
         )
 
     if operation == "create_file" and not (
@@ -175,7 +231,7 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"在 src/ 或 tests/ 之外创建文件需要确认: {normalized}",
+            reason=f"Creating files outside src/ or tests/ requires approval: {normalized}",
         )
 
     if operation == "write_file" and not (
@@ -185,13 +241,13 @@ def classify_file_operation(workspace: Workspace, operation: str, path: str) -> 
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"覆盖 src/ 或 tests/ 之外的文件需要确认: {normalized}",
+            reason=f"Overwriting files outside src/ or tests/ requires approval: {normalized}",
         )
 
     return PermissionDecision(
         risk=RiskLevel.level_1,
         allowed=True,
-        reason=f"{operation} 已允许，属于低风险工作区编辑: {normalized}",
+        reason=f"{operation} is a low-risk workspace edit: {normalized}",
     )
 
 
@@ -200,13 +256,13 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
     lower = " ".join(stripped.lower().split())
 
     try:
-        argv = shlex.split(stripped)
+        argv = shlex.split(stripped, posix=sys.platform != "win32")
     except ValueError:
         return (
             PermissionDecision(
                 risk=RiskLevel.level_3,
                 allowed=False,
-                reason=f"命令无法安全解析: {command}",
+                reason=f"Command could not be parsed safely: {command}",
             ),
             None,
         )
@@ -216,7 +272,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             PermissionDecision(
                 risk=RiskLevel.level_3,
                 allowed=False,
-                reason="空命令被拒绝。",
+                reason="Empty command rejected.",
             ),
             None,
         )
@@ -226,28 +282,45 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             PermissionDecision(
                 risk=RiskLevel.level_3,
                 allowed=False,
-                reason=f"命令被安全策略禁止: {command}",
+                reason=f"Command rejected by safety policy: {command}",
             ),
             None,
         )
+
+    filesystem_decision = _reject_shell_filesystem_work(command)
+    if filesystem_decision is not None:
+        return filesystem_decision, argv
 
     if "|" in lower and "bash" in lower and ("curl" in lower or "wget" in lower):
         return (
             PermissionDecision(
                 risk=RiskLevel.level_3,
                 allowed=False,
-                reason=f"命令被安全策略禁止: {command}",
+                reason=f"Command rejected by safety policy: {command}",
             ),
             None,
         )
 
-    if any(lower.startswith(prefix) for prefix in LEVEL_2_COMMAND_PREFIXES):
+    if _command_contains_prefix(lower, DEV_SERVER_COMMAND_PREFIXES):
+        return (
+            PermissionDecision(
+                risk=RiskLevel.level_3,
+                allowed=False,
+                reason=(
+                    "Do not start long-running dev servers from the agent. "
+                    "Use a focused build, lint, or test command for validation."
+                ),
+            ),
+            argv,
+        )
+
+    if _command_contains_prefix(lower, LEVEL_2_COMMAND_PREFIXES):
         return (
             PermissionDecision(
                 risk=RiskLevel.level_2,
                 allowed=False,
                 requires_approval=True,
-                reason=f"命令需要确认: {command}",
+                reason=f"Shell command may download packages, scaffold files, or modify dependencies: {command}",
             ),
             argv,
         )
@@ -257,7 +330,7 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             PermissionDecision(
                 risk=RiskLevel.level_1,
                 allowed=True,
-                reason=f"已允许低风险 shell 命令: {command}",
+                reason=f"Allowed low-risk shell command: {command}",
             ),
             argv,
         )
@@ -267,25 +340,86 @@ def classify_command(command: str, workspace: Workspace) -> tuple[PermissionDeci
             risk=RiskLevel.level_2,
             allowed=False,
             requires_approval=True,
-            reason=f"未知或中风险 shell 命令需要确认: {command}",
+            reason=f"Unknown or medium-risk shell command requires approval: {command}",
         ),
         argv,
     )
 
 
 def _is_level_1_command(argv: list[str]) -> bool:
-    root = Path(argv[0]).name.lower()
-    if root.endswith(".cmd") or root.endswith(".exe"):
-        root = root.rsplit(".", 1)[0]
-
+    root = _normalize_command_root(argv[0])
     if root not in LEVEL_1_COMMAND_ROOTS:
         return False
 
-    if root in {"rg", "grep", "ls", "dir", "pwd", "cat", "type", "pytest", "ruff", "mypy", "node"}:
+    if root in {"pytest", "ruff", "mypy", "node"}:
         return True
 
-    command_prefix = tuple(part.lower() for part in argv[:2])
-    return any(command_prefix == pattern for pattern in LEVEL_1_COMMAND_PATTERNS)
+    normalized = tuple(
+        _normalize_command_root(part) if index == 0 else part.lower()
+        for index, part in enumerate(argv)
+    )
+    return any(_argv_startswith(normalized, pattern) for pattern in LEVEL_1_COMMAND_PATTERNS)
+
+
+def _reject_shell_filesystem_work(command: str) -> PermissionDecision | None:
+    for segment in _shell_command_segments(command):
+        root = _shell_segment_root(segment)
+        if root in {"cd", "chdir", "pushd", "popd"}:
+            continue
+        if root in SHELL_FILESYSTEM_COMMAND_ROOTS or _segment_has_redirection(segment):
+            return PermissionDecision(
+                risk=RiskLevel.level_3,
+                allowed=False,
+                reason=(
+                    "Use dedicated workspace tools instead of shell for file inspection or edits "
+                    "(list_files/read_file/search_text/find_files/git_diff/patch_file/create_file/write_file/delete_file)."
+                ),
+            )
+    return None
+
+
+def _shell_command_segments(command: str) -> list[str]:
+    normalized = " ".join(command.split())
+    segments = [normalized]
+    for separator in ("&&", "||", ";", "&"):
+        segments = [
+            part.strip()
+            for segment in segments
+            for part in segment.split(separator)
+            if part.strip()
+        ]
+    return segments
+
+
+def _shell_segment_root(segment: str) -> str:
+    try:
+        parts = shlex.split(segment, posix=sys.platform != "win32")
+    except ValueError:
+        parts = segment.split()
+    if not parts:
+        return ""
+    return _normalize_command_root(parts[0])
+
+
+def _normalize_command_root(value: str) -> str:
+    root = Path(value.strip("\"'")).name.lower()
+    if root.endswith((".cmd", ".exe", ".bat")):
+        root = root.rsplit(".", 1)[0]
+    return root
+
+
+def _segment_has_redirection(segment: str) -> bool:
+    without_quotes = re.sub(r"""(['"]).*?\1""", "", segment)
+    without_stderr_merge = without_quotes.replace("2>&1", "").replace("1>&2", "")
+    return bool(re.search(r"(^|\s)\d?>{1,2}(?!=|&)", without_stderr_merge))
+
+
+def _command_contains_prefix(lower_command: str, prefixes: tuple[str, ...]) -> bool:
+    return any(segment.startswith(prefix) for segment in _shell_command_segments(lower_command) for prefix in prefixes)
+
+
+def _argv_startswith(argv: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
+    return len(argv) >= len(prefix) and argv[: len(prefix)] == prefix
 
 
 def normalize_path_arg(path: str | Path) -> str:

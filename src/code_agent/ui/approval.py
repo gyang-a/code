@@ -9,7 +9,7 @@ def format_approval_summary(
     *,
     max_length: int = 140,
 ) -> str:
-    tool_name = str((action or {}).get("tool") or "unknown")
+    tool_name = str((action or {}).get("tool") or (action or {}).get("name") or "unknown")
     args = dict((action or {}).get("args") or {})
     detail = _action_detail(tool_name, args) or _clean_reason(reason) or "requires approval"
     return _truncate_single_line(f"{tool_name}: {detail}", max_length)

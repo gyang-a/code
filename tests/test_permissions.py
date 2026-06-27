@@ -69,6 +69,51 @@ class PermissionTests(unittest.TestCase):
             self.assertTrue(decision.requires_approval)
             self.assertEqual(argv, ["python", "scripts/custom_check.py"])
 
+    def test_shell_file_listing_is_rejected_in_favor_of_tool(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, argv = classify_command("dir src", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_3)
+            self.assertFalse(decision.allowed)
+            self.assertIn("dedicated workspace tools", decision.reason)
+            self.assertEqual(argv, ["dir", "src"])
+
+    def test_shell_file_read_is_rejected_in_favor_of_tool(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, argv = classify_command("type package.json", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_3)
+            self.assertFalse(decision.allowed)
+            self.assertIn("read_file", decision.reason)
+            self.assertEqual(argv, ["type", "package.json"])
+
+    def test_shell_file_write_redirection_is_rejected_in_favor_of_tool(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, argv = classify_command("echo hello > test.txt", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_3)
+            self.assertFalse(decision.allowed)
+            self.assertIn("write_file", decision.reason)
+            self.assertEqual(argv, ["echo", "hello", ">", "test.txt"])
+
+    def test_chained_npm_create_requires_explicit_scaffolding_approval(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, argv = classify_command("cd . && npm create vite@latest app -- --template react", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_2)
+            self.assertTrue(decision.requires_approval)
+            self.assertIn("download packages", decision.reason)
+            self.assertIn("npm create", decision.reason)
+            self.assertIsNotNone(argv)
+
     def test_rm_rf_is_forbidden(self) -> None:
         with TemporaryWorkspace() as tmp_path:
             workspace = Workspace(tmp_path)

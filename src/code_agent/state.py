@@ -1,28 +1,22 @@
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, Required, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
-class AgentState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
+class AgentState(TypedDict, total=False):
+    messages: Required[Annotated[list[BaseMessage], add_messages]]
 
-    workspace: str
-    user_goal: str
-    context_summary: str | None
-    recent_files: list[str]
-    compaction_count: int
+    workspace: NotRequired[str]
+    user_goal: NotRequired[str]
 
-    iteration_count: int
-    max_iterations: int
+    changed_files: NotRequired[list[str]]
+    did_write: NotRequired[bool]
 
-    changed_files: list[str]
-    did_write: bool
+    test_command: NotRequired[str | None]
+    test_result: NotRequired[str | None]
 
-    test_command: str | None
-    test_result: str | None
-
-    tool_errors: list[str]
-    final_answer: str | None
+    tool_errors: NotRequired[list[str]]
+    final_answer: NotRequired[str | None]
