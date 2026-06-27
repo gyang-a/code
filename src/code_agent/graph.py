@@ -467,17 +467,11 @@ def _messages_for_agent(state: AgentState, workspace: Workspace, max_tool_calls_
 
     runtime_message = SystemMessage(
         content=(
-            "Host-provided turn metadata follows. Treat it as current runtime context; "
-            "do not call tools just to rediscover these facts. Use tools only when you "
-            "need file contents, command output, or to make changes.\n\n"
+            "Runtime metadata:\n"
+            "The host provides the current workspace snapshot below. Treat it as current context, "
+            "not as conversation history.\n\n"
             f"{build_turn_metadata(workspace)}\n\n"
-            "Operational constraints:\n"
-            "- You are the agent node: choose whether to inspect, edit, validate, or answer.\n"
-            f"- Use at most {max_tool_calls_per_turn} tool calls per turn; inspect in small batches.\n"
-            "- Do not read README or list trees just to orient yourself; use host metadata first.\n"
-            "- read_file returns a bounded line window by default; request later start_line values as needed.\n"
-            "- If you changed files, decide whether a focused validation command is useful before final answer.\n"
-            "- Stop and answer when the task is complete; the host enforces a max tool-iteration limit."
+            f"Per-turn tool call limit: {max_tool_calls_per_turn}."
         )
     )
     insert_at = 1 if prepared and prepared[0].type == "system" else 0
