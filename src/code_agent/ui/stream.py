@@ -85,7 +85,4 @@ def _render_messages(messages: list[BaseMessage]) -> None:
 
 
 def _tool_result_summary(first_line: str) -> str:
-    if first_line.startswith("ALLOWED[") and "shell" in first_line.lower():
-        prefix = first_line.split(":", 1)[0]
-        return f"{prefix}: allowed shell command"
     return truncate(first_line, 180)

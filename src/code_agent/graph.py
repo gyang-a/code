@@ -15,7 +15,7 @@ from code_agent.prompts import SYSTEM_PROMPT
 from code_agent.services.context import compact_messages, should_compact_messages
 from code_agent.services.metadata import build_turn_metadata
 from code_agent.services.permissions import classify_tool_call
-from code_agent.services.sandbox import SandboxPolicy
+from code_agent.services.sandbox import SandboxPolicy, describe_sandbox_policy
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace
 from code_agent.state import AgentState
@@ -285,15 +285,16 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         read_max_lines=agent_config.file_read_max_lines,
         exclude_globs=agent_config.exclude_globs,
     )
+    sandbox_policy = SandboxPolicy(
+        backend=agent_config.shell_sandbox_backend,
+        docker_image=agent_config.docker_image,
+        allow_network=agent_config.docker_allow_network,
+    )
     tools = build_tools(
         workspace,
         read_max_lines=agent_config.file_read_max_lines,
         tool_output_limit=agent_config.tool_output_limit,
-        sandbox_policy=SandboxPolicy(
-            backend=agent_config.shell_sandbox_backend,
-            docker_image=agent_config.docker_image,
-            allow_network=agent_config.docker_allow_network,
-        ),
+        sandbox_policy=sandbox_policy,
     )
     tools_by_name = {tool.name: tool for tool in tools}
     llm_kwargs = {"temperature": 0}
@@ -322,7 +323,14 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
                 "iteration_count": iteration_count,
                 "final_answer": "Stopped: agent reached the maximum tool-iteration count.",
             }
-        response = llm_with_tools.invoke(_messages_for_agent(state, workspace, agent_config.max_tool_calls_per_turn))
+        response = llm_with_tools.invoke(
+            _messages_for_agent(
+                state,
+                workspace,
+                agent_config.max_tool_calls_per_turn,
+                shell_sandbox=describe_sandbox_policy(sandbox_policy),
+            )
+        )
         update = {"messages": [response], "iteration_count": iteration_count}
         if not getattr(response, "tool_calls", None):
             update["final_answer"] = response.content
@@ -385,7 +393,9 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
                     changed_files.add(path_arg)
                 changed_files.update(_changed_files_from_git(workspace))
 
-            if tool_call and tool_call.get("name") in {"run_command", "run_shell"} and first_line.startswith("ALLOWED["):
+            if tool_call and tool_call.get("name") in {"run_command", "run_shell"} and not first_line.startswith(
+                ("ERROR:", "REJECTED[")
+            ):
                 args = dict(tool_call.get("args") or {})
                 update_test_command = str(args.get("command") or "")
                 if update_test_command:
@@ -461,7 +471,13 @@ def _changed_files_from_git(workspace: Workspace) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def _messages_for_agent(state: AgentState, workspace: Workspace, max_tool_calls_per_turn: int = 2) -> list:
+def _messages_for_agent(
+    state: AgentState,
+    workspace: Workspace,
+    max_tool_calls_per_turn: int = 2,
+    *,
+    shell_sandbox: str = "local",
+) -> list:
     messages = _messages_for_llm_with_context_summary(state)
     prepared = _with_single_base_system_prompt(messages)
 
@@ -471,6 +487,7 @@ def _messages_for_agent(state: AgentState, workspace: Workspace, max_tool_calls_
             "The host provides the current workspace snapshot below. Treat it as current context, "
             "not as conversation history.\n\n"
             f"{build_turn_metadata(workspace)}\n\n"
+            f"Shell sandbox: {shell_sandbox}.\n"
             f"Per-turn tool call limit: {max_tool_calls_per_turn}."
         )
     )

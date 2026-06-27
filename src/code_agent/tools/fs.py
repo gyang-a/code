@@ -7,7 +7,7 @@ from langchain_core.tools import tool
 from code_agent.services.patcher import replace_exact_once
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
-from code_agent.tools.safety import allowed, classify_tool_call, rejected
+from code_agent.tools.safety import classify_tool_call, rejected
 from code_agent.tools.schemas import (
     CreateFileInput,
     DeleteFileInput,
@@ -21,12 +21,6 @@ from code_agent.tools.schemas import (
 
 def _error(exc: Exception) -> str:
     return f"ERROR: {exc}"
-
-
-def _format_decision_prefix(decision) -> str:
-    if decision.risk.value == "level_1":
-        return allowed(decision.risk, decision.reason)
-    return decision.reason
 
 
 def _git_diff_for(workspace: Workspace, path: str) -> str:
@@ -137,7 +131,7 @@ def build_patch_file_tool(workspace: Workspace):
                     f"ERROR: old text must appear exactly once in {path}; "
                     f"found {result.old_count} occurrences."
                 )
-            return f"{_format_decision_prefix(decision)}\nPatched {path}{_git_diff_for(workspace, path)}"
+            return f"Patched {path}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 
@@ -153,7 +147,7 @@ def build_create_file_tool(workspace: Workspace):
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
             workspace.write_text(path, content, overwrite=False)
-            return f"{_format_decision_prefix(decision)}\nCreated {path}{_git_diff_for(workspace, path)}"
+            return f"Created {path}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 
@@ -169,7 +163,7 @@ def build_write_file_tool(workspace: Workspace):
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
             workspace.write_text(path, content, overwrite=True)
-            return f"{_format_decision_prefix(decision)}\nWrote {path}{_git_diff_for(workspace, path)}"
+            return f"Wrote {path}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 
@@ -191,7 +185,7 @@ def build_delete_file_tool(workspace: Workspace):
                 return f"ERROR: Not a file: {path}"
             before = _git_diff_for(workspace, path)
             file_path.unlink()
-            return f"{allowed(decision.risk, decision.reason)}\nDeleted {path}{before}{_git_diff_for(workspace, path)}"
+            return f"Deleted {path}{before}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 

@@ -16,6 +16,7 @@ from rich.prompt import Prompt
 
 from code_agent.config import AgentConfig, DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL
 from code_agent.services.env import load_dotenv
+from code_agent.services.sandbox import SandboxPolicy, describe_sandbox_policy
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.safety import describe_permission_policy
@@ -134,11 +135,13 @@ def _print_raw(text: str) -> None:
 
 def _doctor(workspace: str) -> None:
     env_path = Path(workspace) / ".env"
+    sandbox_policy = _sandbox_policy_from_env()
     table_rows = [
         ("workspace", "ok" if Path(workspace).is_dir() else "missing"),
         (".env", "found" if env_path.exists() else "missing"),
         ("DEEPSEEK_API_KEY", "set" if os.getenv("DEEPSEEK_API_KEY") else "missing"),
         ("CODE_AGENT_MODEL", os.getenv("CODE_AGENT_MODEL") or "unset"),
+        ("shell_sandbox", describe_sandbox_policy(sandbox_policy)),
         ("git", "found" if shutil.which("git") else "missing"),
         ("rg", "found" if shutil.which("rg") else "missing"),
         ("langgraph", "found" if importlib.util.find_spec("langgraph") else "missing"),
@@ -208,6 +211,15 @@ def _is_slash_command(user_input: str) -> bool:
     return user_input.lstrip().startswith("/")
 
 
+def _sandbox_policy_from_env() -> SandboxPolicy:
+    config = AgentConfig()
+    return SandboxPolicy(
+        backend=config.shell_sandbox_backend,
+        docker_image=config.docker_image,
+        allow_network=config.docker_allow_network,
+    )
+
+
 def _prompt_approval_decisions(interrupt_value: Any) -> list[dict[str, Any]]:
     payload = interrupt_value if isinstance(interrupt_value, dict) else {}
     action_requests = payload.get("action_requests")
@@ -252,6 +264,7 @@ def chat(
         env_file=str(env_path) if loaded_env else None,
     )
     print_banner(session.workspace, session.model)
+    console.print(f"[dim]shell sandbox: {describe_sandbox_policy(_sandbox_policy_from_env())}[/dim]")
     if loaded_env:
         console.print(f"[dim]Loaded environment variables from {env_path}[/dim]")
 

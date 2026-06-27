@@ -27,6 +27,24 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn("ok", result.stdout)
 
+    def test_run_shell_supports_shell_builtins(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+            sandbox = ShellSandbox(workspace)
+
+            result = sandbox.run_shell("echo ok", timeout=5)
+
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("ok", result.stdout)
+
+    def test_run_shell_rejects_obvious_path_escape(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+            sandbox = ShellSandbox(workspace)
+
+            with self.assertRaises(WorkspaceError):
+                sandbox.run_shell("cd ..", timeout=5)
+
     def test_build_shell_sandbox_selects_docker_backend(self) -> None:
         with TemporaryWorkspace() as tmp_path:
             workspace = Workspace(tmp_path)
@@ -62,6 +80,27 @@ class SandboxTests(unittest.TestCase):
             self.assertIn("python:3.12-slim", docker_args)
             self.assertEqual(docker_args[-3:], ["python", "-c", "print('ok')"])
             self.assertIn(f"{tmp_path.resolve()}:/workspace", docker_args)
+
+    def test_docker_backend_runs_shell_string_through_container_shell(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+            sandbox = DockerSandbox(
+                workspace,
+                SandboxPolicy(backend="docker", docker_image="python:3.12-slim"),
+            )
+
+            with patch("code_agent.services.sandbox.shutil.which", return_value="docker"), patch(
+                "code_agent.services.sandbox.subprocess.run"
+            ) as run_mock:
+                run_mock.return_value.returncode = 0
+                run_mock.return_value.stdout = "ok\n"
+                run_mock.return_value.stderr = ""
+
+                result = sandbox.run_shell("echo ok", timeout=5)
+
+            docker_args = run_mock.call_args.args[0]
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(docker_args[-3:], ["sh", "-lc", "echo ok"])
 
 
 class TemporaryWorkspace:

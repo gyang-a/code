@@ -87,10 +87,6 @@ def rejected(risk: RiskLevel, reason: str) -> str:
     return f"REJECTED[{risk.value}]: {reason}"
 
 
-def allowed(risk: RiskLevel, reason: str) -> str:
-    return f"ALLOWED[{risk.value}]: {reason}"
-
-
 def describe_permission_policy() -> str:
     return "\n".join(
         [
