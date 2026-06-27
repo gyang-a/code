@@ -13,6 +13,7 @@ from code_agent.graph import (
 )
 from code_agent.main import _is_slash_command
 from code_agent.services.workspace import Workspace
+from code_agent.ui.approval import format_approval_summary
 
 
 class GraphRoutingTests(unittest.TestCase):
@@ -44,6 +45,22 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertEqual(message.type, "tool")
         self.assertEqual(message.tool_call_id, "call_1")
         self.assertEqual(message.id, "tool-msg-1")
+
+    def test_approval_summary_keeps_multiline_shell_command_to_one_line(self) -> None:
+        summary = format_approval_summary(
+            {
+                "tool": "run_shell",
+                "args": {
+                    "command": 'python -c "\nprint(1)\nprint(2)\n"',
+                },
+            },
+            "APPROVAL_REQUIRED[level_2]: 未知或中风险 shell 命令需要确认",
+            max_length=80,
+        )
+
+        self.assertNotIn("\n", summary)
+        self.assertIn("run_shell: python -c", summary)
+        self.assertLessEqual(len(summary), 80)
 
     def test_execute_node_is_independently_testable(self) -> None:
         tool = FakeTool("echo_tool", "ok")

@@ -6,6 +6,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from code_agent.services.summarizer import truncate
+from code_agent.ui.approval import format_approval_summary
 from code_agent.ui.console import console
 
 
@@ -52,7 +53,10 @@ def _render_node_update(node_name: str, update: Mapping[str, Any]) -> None:
         _render_messages(update["messages"])
 
     if update.get("approval_reason"):
-        console.print(f"[yellow]  需要审批:[/yellow] {update['approval_reason']}")
+        console.print(
+            f"[yellow]  需要审批:[/yellow] "
+            f"{format_approval_summary(update.get('pending_approval'), str(update['approval_reason']))}"
+        )
 
     if update.get("rejected_reason"):
         console.print(f"[red]  已拒绝:[/red] {update['rejected_reason']}")

@@ -17,6 +17,7 @@ from code_agent.services.env import load_dotenv
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.safety import describe_permission_policy
+from code_agent.ui.approval import format_approval_summary
 from code_agent.ui.console import console, print_banner, print_help
 from code_agent.ui.stream import final_answer_from_chunk, interrupt_from_chunk, render_stream_chunk
 
@@ -206,12 +207,9 @@ def chat(
                     final_answer = values.get("final_answer") or values["messages"][-1].content
                     break
                 interrupt_value = interrupts[0].value
-                console.print("\n[bold yellow]需要审批[/bold yellow]")
-                console.print(interrupt_value.get("reason", "该操作需要确认。"))
                 action = interrupt_value.get("action")
-                if action:
-                    console.print(f"工具: {action.get('tool')}")
-                    console.print(f"参数: {action.get('args')}")
+                reason = interrupt_value.get("reason", "该操作需要确认。")
+                console.print(f"\n[bold yellow]需要审批[/bold yellow] {format_approval_summary(action, reason)}")
                 approved = Prompt.ask("是否批准这个 Level 2 操作？", choices=["y", "n"], default="n")
                 final_answer = _run_graph_stream(graph, Command(resume={"approved": approved == "y"}), config)
         except Exception as exc:
