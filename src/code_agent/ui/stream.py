@@ -7,17 +7,15 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from rich.markup import escape
 
 from code_agent.services.summarizer import truncate
-from code_agent.ui.approval import format_approval_summary, format_tool_call_summary
+from code_agent.ui.approval import format_tool_call_summary
 from code_agent.ui.console import console
 
 
 NODE_LABELS = {
-    "agent": "Agent 正在思考",
-    "context_manager": "已压缩历史上下文",
-    "execute": "已执行工具调用",
-    "tool_result_router": "已分类工具结果",
-    "approval": "等待审批",
-    "reject": "已处理拒绝操作",
+    "agent": "Agent is thinking",
+    "context_manager": "Compacted conversation context",
+    "execute": "Handled tool calls",
+    "tool_result_router": "Processed tool results",
 }
 
 
@@ -31,7 +29,7 @@ def render_stream_chunk(chunk: Mapping[str, Any]) -> None:
         label = NODE_LABELS.get(node_name, node_name)
         console.print(f"[dim]> {label}[/dim]")
         if isinstance(update, Mapping):
-            _render_node_update(node_name, update)
+            _render_node_update(update)
 
 
 def final_answer_from_chunk(chunk: Mapping[str, Any]) -> str | None:
@@ -49,31 +47,20 @@ def interrupt_from_chunk(chunk: Mapping[str, Any]) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else {"reason": str(value)}
 
 
-def _render_node_update(node_name: str, update: Mapping[str, Any]) -> None:
+def _render_node_update(update: Mapping[str, Any]) -> None:
     if update.get("messages"):
         _render_messages(update["messages"])
 
-    if update.get("approval_reason"):
-        console.print(
-            f"[yellow]  需要审批:[/yellow] "
-            f"{escape(format_approval_summary(update.get('pending_approval'), str(update['approval_reason'])))}"
-        )
-
-    if update.get("rejected_reason"):
-        console.print(f"[red]  已拒绝:[/red] {escape(str(update['rejected_reason']))}")
-
     if update.get("test_command"):
         summary = format_tool_call_summary("run_shell", {"command": update["test_command"]}, max_length=100)
-        console.print(
-            f"[dim]  验证命令: {escape(summary)}[/dim]"
-        )
+        console.print(f"[dim]  validation command: {escape(summary)}[/dim]")
 
     if update.get("test_result"):
-        first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "验证完成"
-        console.print(f"[dim]  {first_line}[/dim]")
+        first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "validation complete"
+        console.print(f"[dim]  {escape(first_line)}[/dim]")
 
     if update.get("compaction_count"):
-        console.print(f"[dim]  上下文压缩次数: {update['compaction_count']}[/dim]")
+        console.print(f"[dim]  compaction count: {update['compaction_count']}[/dim]")
 
 
 def _context_update_compacted(update: Any) -> bool:
@@ -88,17 +75,17 @@ def _render_messages(messages: list[BaseMessage]) -> None:
                 name = tool_call.get("name", "tool")
                 args = tool_call.get("args") or {}
                 summary = format_tool_call_summary(name, args, max_length=100)
-                console.print(f"[cyan]  工具调用:[/cyan] {escape(summary)}")
+                console.print(f"[cyan]  tool call:[/cyan] {escape(summary)}")
             if message.content and not tool_calls:
-                console.print(f"[dim]  Agent 已生成回复草稿[/dim]")
+                console.print("[dim]  Agent drafted a response[/dim]")
         elif isinstance(message, ToolMessage):
-            first_line = str(message.content).splitlines()[0] if str(message.content).strip() else "空工具结果"
-            style = "yellow" if "APPROVAL_REQUIRED" in first_line else "red" if "REJECTED" in first_line else "dim"
-            console.print(f"[{style}]  工具结果:[/{style}] {escape(_tool_result_summary(first_line))}")
+            first_line = str(message.content).splitlines()[0] if str(message.content).strip() else "empty tool result"
+            style = "red" if first_line.startswith("REJECTED[") else "dim"
+            console.print(f"[{style}]  tool result:[/{style}] {escape(_tool_result_summary(first_line))}")
 
 
 def _tool_result_summary(first_line: str) -> str:
     if first_line.startswith("ALLOWED[") and "shell" in first_line.lower():
         prefix = first_line.split(":", 1)[0]
-        return f"{prefix}: 已允许 shell 命令"
+        return f"{prefix}: allowed shell command"
     return truncate(first_line, 180)

@@ -44,10 +44,7 @@ def _action_detail(tool_name: str, args: Mapping[str, Any]) -> str | None:
 def _clean_reason(reason: str | None) -> str | None:
     if not reason:
         return None
-    cleaned = str(reason)
-    if ":" in cleaned and cleaned.startswith("APPROVAL_REQUIRED"):
-        cleaned = cleaned.split(":", 1)[1]
-    return _single_line(cleaned)
+    return _single_line(reason)
 
 
 def _single_line(value: Any) -> str:

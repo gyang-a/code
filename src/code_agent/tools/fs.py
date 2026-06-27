@@ -7,7 +7,7 @@ from langchain_core.tools import tool
 from code_agent.services.patcher import replace_exact_once
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
-from code_agent.tools.safety import approval_required, allowed, classify_tool_call, rejected
+from code_agent.tools.safety import allowed, classify_tool_call, rejected
 from code_agent.tools.schemas import (
     CreateFileInput,
     DeleteFileInput,
@@ -17,9 +17,6 @@ from code_agent.tools.schemas import (
     ReadFileInput,
     WriteFileInput,
 )
-
-
-APPROVAL_TOKEN = "approved"
 
 
 def _error(exc: Exception) -> str:
@@ -47,16 +44,16 @@ def _git_diff_for(workspace: Workspace, path: str) -> str:
             shell=False,
         )
         if result.returncode not in (0, 1):
-            return "\n\nDiff 记录: 当前目录不是 git 仓库，或 git diff 不可用。"
+            return "\n\nDiff: git diff is unavailable for this workspace."
         output = result.stdout if result.returncode == 0 else result.stdout + result.stderr
         diff = truncate(output, 4000)
         if diff:
-            return "\n\nDiff 记录:\n" + diff
+            return "\n\nDiff:\n" + diff
         if resolved.exists():
-            return "\n\nDiff 记录: 文件可能是新增文件，或 git diff 暂无变化；可使用 git_status 查看。"
-        return "\n\nDiff 记录: 暂无可用 diff。"
+            return "\n\nDiff: no tracked diff yet; use git_status if needed."
+        return "\n\nDiff: no diff available."
     except (WorkspaceError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return f"\n\nDiff 记录失败: {exc}"
+        return f"\n\nDiff failed: {exc}"
 
 
 def build_read_file_tool(
@@ -67,7 +64,7 @@ def build_read_file_tool(
 ):
     @tool(args_schema=ReadFileInput)
     def read_file(path: str, start_line: int = 1, max_lines: int | None = None) -> str:
-        """读取工作区内文本文件的一段内容；默认只返回有限行数，可用 start_line 继续读取。"""
+        """Read a bounded text window from a file in the workspace."""
         try:
             decision = classify_tool_call(workspace, "read_file", {"path": path})
             if decision.risk.value == "level_3":
@@ -86,16 +83,16 @@ def build_read_file_tool(
 def build_list_files_tool(workspace: Workspace):
     @tool(args_schema=ListFilesInput)
     def list_files(path: str = ".") -> str:
-        """列出工作区目录下的直接子项。"""
+        """List direct children of a workspace directory."""
         try:
             decision = classify_tool_call(workspace, "list_files", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
             dir_path = workspace.resolve(path)
             if not dir_path.exists():
-                return f"ERROR: 目录不存在: {path}"
+                return f"ERROR: Directory does not exist: {path}"
             if not dir_path.is_dir():
-                return f"ERROR: 不是目录: {path}"
+                return f"ERROR: Not a directory: {path}"
 
             lines = []
             for child in sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
@@ -113,7 +110,7 @@ def build_list_files_tool(workspace: Workspace):
 def build_get_file_tree_tool(workspace: Workspace):
     @tool(args_schema=FileTreeInput)
     def get_file_tree(path: str = ".", max_entries: int = 200) -> str:
-        """返回工作区路径下有数量上限的文件树。"""
+        """Return a bounded file tree for a workspace path."""
         try:
             decision = classify_tool_call(workspace, "get_file_tree", {"path": path})
             if decision.risk.value == "level_3":
@@ -128,21 +125,19 @@ def build_get_file_tree_tool(workspace: Workspace):
 
 def build_patch_file_tool(workspace: Workspace):
     @tool(args_schema=PatchFileInput)
-    def patch_file(path: str, old: str, new: str, approval_token: str | None = None) -> str:
-        """替换文件中的一个精确文本块；old 文本必须只出现一次。"""
+    def patch_file(path: str, old: str, new: str) -> str:
+        """Replace one exact text block in a workspace file."""
         try:
             decision = classify_tool_call(workspace, "patch_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            if decision.requires_approval and approval_token != APPROVAL_TOKEN:
-                return approval_required(decision.risk, decision.reason)
             result = replace_exact_once(workspace, path, old, new)
             if not result.changed:
                 return (
-                    f"ERROR: old 文本在 {path} 中必须只出现一次；"
-                    f"实际找到 {result.old_count} 处。"
+                    f"ERROR: old text must appear exactly once in {path}; "
+                    f"found {result.old_count} occurrences."
                 )
-            return f"{_format_decision_prefix(decision)}\n已修补 {path}{_git_diff_for(workspace, path)}"
+            return f"{_format_decision_prefix(decision)}\nPatched {path}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 
@@ -151,16 +146,14 @@ def build_patch_file_tool(workspace: Workspace):
 
 def build_create_file_tool(workspace: Workspace):
     @tool(args_schema=CreateFileInput)
-    def create_file(path: str, content: str, approval_token: str | None = None) -> str:
-        """在工作区内创建新的文本文件；如果文件已存在则拒绝。"""
+    def create_file(path: str, content: str) -> str:
+        """Create a new text file in the workspace."""
         try:
             decision = classify_tool_call(workspace, "create_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            if decision.requires_approval and approval_token != APPROVAL_TOKEN:
-                return approval_required(decision.risk, decision.reason)
             workspace.write_text(path, content, overwrite=False)
-            return f"{_format_decision_prefix(decision)}\n已创建 {path}{_git_diff_for(workspace, path)}"
+            return f"{_format_decision_prefix(decision)}\nCreated {path}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 
@@ -169,20 +162,14 @@ def build_create_file_tool(workspace: Workspace):
 
 def build_write_file_tool(workspace: Workspace):
     @tool(args_schema=WriteFileInput)
-    def write_file(path: str, content: str, approval_token: str | None = None) -> str:
-        """覆盖工作区内的小文本文件；编辑已有文件时优先使用 patch_file。"""
+    def write_file(path: str, content: str) -> str:
+        """Overwrite a text file in the workspace."""
         try:
             decision = classify_tool_call(workspace, "write_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            if decision.requires_approval and approval_token != APPROVAL_TOKEN:
-                return approval_required(decision.risk, decision.reason)
-            existing = workspace.resolve(path)
-            if existing.exists() and existing.stat().st_size > 20_000:
-                if approval_token != APPROVAL_TOKEN:
-                    return approval_required(decision.risk, "覆盖大于 20KB 的文件需要确认。")
             workspace.write_text(path, content, overwrite=True)
-            return f"{_format_decision_prefix(decision)}\n已写入 {path}{_git_diff_for(workspace, path)}"
+            return f"{_format_decision_prefix(decision)}\nWrote {path}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 
@@ -191,22 +178,20 @@ def build_write_file_tool(workspace: Workspace):
 
 def build_delete_file_tool(workspace: Workspace):
     @tool(args_schema=DeleteFileInput)
-    def delete_file(path: str, approval_token: str | None = None) -> str:
-        """请求删除工作区文件；没有人工审批时不会删除。"""
+    def delete_file(path: str) -> str:
+        """Delete a workspace file."""
         try:
             decision = classify_tool_call(workspace, "delete_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            if approval_token != APPROVAL_TOKEN:
-                return approval_required(decision.risk, decision.reason)
             file_path = workspace.resolve(path)
             if not file_path.exists():
-                return f"ERROR: 文件不存在: {path}"
+                return f"ERROR: File does not exist: {path}"
             if not file_path.is_file():
-                return f"ERROR: 不是文件: {path}"
+                return f"ERROR: Not a file: {path}"
             before = _git_diff_for(workspace, path)
             file_path.unlink()
-            return f"{allowed(decision.risk, decision.reason)}\n已删除 {path}{before}{_git_diff_for(workspace, path)}"
+            return f"{allowed(decision.risk, decision.reason)}\nDeleted {path}{before}{_git_diff_for(workspace, path)}"
         except WorkspaceError as exc:
             return _error(exc)
 

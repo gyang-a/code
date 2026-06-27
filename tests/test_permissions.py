@@ -6,7 +6,6 @@ import unittest
 from code_agent.models import RiskLevel
 from code_agent.services.workspace import Workspace
 from code_agent.tools.safety import classify_command, classify_file_operation
-from code_agent.tools.fs import build_patch_file_tool
 
 
 class PermissionTests(unittest.TestCase):
@@ -90,34 +89,16 @@ class PermissionTests(unittest.TestCase):
             self.assertFalse(decision.allowed)
             self.assertIsNone(argv)
 
-    def test_level_2_patch_requires_token_before_execution(self) -> None:
+    def test_level_2_patch_is_classified_before_graph_execution(self) -> None:
         with TemporaryWorkspace() as tmp_path:
             (tmp_path / "pyproject.toml").write_text("name = \"old\"\n", encoding="utf-8")
             workspace = Workspace(tmp_path)
-            patch_file = build_patch_file_tool(workspace)
 
-            result = patch_file.invoke(
-                {
-                    "path": "pyproject.toml",
-                    "old": "name = \"old\"",
-                    "new": "name = \"new\"",
-                }
-            )
+            decision = classify_file_operation(workspace, "patch_file", "pyproject.toml")
 
-            self.assertIn("APPROVAL_REQUIRED[level_2]", result)
+            self.assertEqual(decision.risk, RiskLevel.level_2)
+            self.assertTrue(decision.requires_approval)
             self.assertEqual((tmp_path / "pyproject.toml").read_text(encoding="utf-8"), "name = \"old\"\n")
-
-            approved_result = patch_file.invoke(
-                {
-                    "path": "pyproject.toml",
-                    "old": "name = \"old\"",
-                    "new": "name = \"new\"",
-                    "approval_token": "approved",
-                }
-            )
-
-            self.assertIn("已修补 pyproject.toml", approved_result)
-            self.assertEqual((tmp_path / "pyproject.toml").read_text(encoding="utf-8"), "name = \"new\"\n")
 
 
 class TemporaryWorkspace:

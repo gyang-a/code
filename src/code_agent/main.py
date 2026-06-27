@@ -8,6 +8,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import typer
 from langgraph.types import Command
@@ -56,10 +57,6 @@ def _initial_state(session: Session, user_input: str) -> dict:
         "did_write": False,
         "test_command": None,
         "test_result": None,
-        "needs_approval": False,
-        "approval_reason": None,
-        "pending_approval": None,
-        "rejected_reason": None,
         "tool_errors": [],
         "final_answer": None,
     }
@@ -122,12 +119,12 @@ def _run_git_undo(workspace: str, raw_arg: str) -> str:
 
     remaining = _run_git_status_porcelain(workspace)
     if remaining:
-        outputs.append("\n已回滚 tracked 变更。仍有未回滚的变更：\n")
+        outputs.append("\nRestored tracked changes. Remaining changes:\n")
         outputs.append(remaining)
         if not include_untracked:
-            outputs.append("\n提示：如需删除未跟踪的新文件，使用 /undo --include-untracked。")
+            outputs.append("\nTip: use /undo --include-untracked to remove untracked files.\n")
     else:
-        outputs.append("已回滚工作区变更。")
+        outputs.append("Restored workspace changes.")
     return truncate("".join(outputs))
 
 
@@ -138,15 +135,15 @@ def _print_raw(text: str) -> None:
 def _doctor(workspace: str) -> None:
     env_path = Path(workspace) / ".env"
     table_rows = [
-        ("工作区", "正常" if Path(workspace).is_dir() else "缺失"),
-        (".env", "已找到" if env_path.exists() else "缺失"),
-        ("DEEPSEEK_API_KEY", "已设置" if os.getenv("DEEPSEEK_API_KEY") else "缺失"),
-        ("CODE_AGENT_MODEL", os.getenv("CODE_AGENT_MODEL") or "未设置"),
-        ("git", "已找到" if shutil.which("git") else "缺失"),
-        ("rg", "已找到" if shutil.which("rg") else "缺失，将使用 Python fallback"),
-        ("langgraph", "已找到" if importlib.util.find_spec("langgraph") else "缺失"),
-        ("langchain", "已找到" if importlib.util.find_spec("langchain") else "缺失"),
-        ("langchain_deepseek", "已找到" if importlib.util.find_spec("langchain_deepseek") else "缺失"),
+        ("workspace", "ok" if Path(workspace).is_dir() else "missing"),
+        (".env", "found" if env_path.exists() else "missing"),
+        ("DEEPSEEK_API_KEY", "set" if os.getenv("DEEPSEEK_API_KEY") else "missing"),
+        ("CODE_AGENT_MODEL", os.getenv("CODE_AGENT_MODEL") or "unset"),
+        ("git", "found" if shutil.which("git") else "missing"),
+        ("rg", "found" if shutil.which("rg") else "missing"),
+        ("langgraph", "found" if importlib.util.find_spec("langgraph") else "missing"),
+        ("langchain", "found" if importlib.util.find_spec("langchain") else "missing"),
+        ("langchain_deepseek", "found" if importlib.util.find_spec("langchain_deepseek") else "missing"),
     ]
     for name, status in table_rows:
         console.print(f"[bold]{name}[/bold]: {status}")
@@ -163,46 +160,46 @@ def _handle_slash(command: str, session: Session) -> bool:
         print_help()
     elif name == "/clear":
         session.reset()
-        console.print(f"已开启新的会话线程: {session.thread_id}")
+        console.print(f"Started a new thread: {session.thread_id}")
     elif name == "/model":
         if arg:
             session.model = arg
-            console.print(f"模型已设置为: {session.model}")
+            console.print(f"Model set to: {session.model}")
         else:
-            console.print(f"当前模型: {session.model}")
+            console.print(f"Current model: {session.model}")
     elif name == "/status":
-        console.print(f"工作区: {session.workspace}")
+        console.print(f"workspace: {session.workspace}")
         console.print(f"thread_id: {session.thread_id}")
-        console.print(f"模型: {session.model}")
-        console.print(f"交互次数: {session.interactions}")
+        console.print(f"model: {session.model}")
+        console.print(f"interactions: {session.interactions}")
     elif name == "/tools":
         _print_raw(describe_permission_policy())
     elif name == "/diff":
         diff = _run_git_diff(session.workspace)
-        _print_raw(diff or "当前没有 git diff。")
+        _print_raw(diff or "No git diff.")
     elif name in {"/undo", "/revert"}:
         status = _run_git_status_porcelain(session.workspace)
         if not status:
-            _print_raw("当前没有可回滚的 git 工作区变更。")
+            _print_raw("No workspace changes to restore.")
             return True
         include_untracked, targets = _parse_undo_args(arg)
         scope = " ".join(targets)
-        action = "回滚 tracked 文件改动并删除未跟踪文件" if include_untracked else "回滚 tracked 文件改动"
-        _print_raw(f"{action}: {scope}\n\n当前文件改动:\n{status}")
-        approved = Prompt.ask("确认回滚这些文件改动？", choices=["y", "n"], default="n")
+        action = "restore tracked changes and delete untracked files" if include_untracked else "restore tracked changes"
+        _print_raw(f"{action}: {scope}\n\nCurrent changes:\n{status}")
+        approved = Prompt.ask("Confirm restore?", choices=["y", "n"], default="n")
         if approved == "y":
             _print_raw(_run_git_undo(session.workspace, arg))
         else:
-            _print_raw("已取消回滚。")
+            _print_raw("Restore cancelled.")
     elif name == "/doctor":
         _doctor(session.workspace)
     elif name == "/usage":
-        console.print(f"交互次数: {session.interactions}")
+        console.print(f"interactions: {session.interactions}")
         console.print(f"thread_id: {session.thread_id}")
     elif name == "/mcp":
-        console.print("当前 MVP 尚未配置 MCP 集成。")
+        console.print("MCP integration is not configured in this MVP.")
     else:
-        console.print(f"未知 slash command: {name}。输入 /help 查看命令。")
+        console.print(f"Unknown slash command: {name}. Type /help to list commands.")
 
     return True
 
@@ -211,12 +208,35 @@ def _is_slash_command(user_input: str) -> bool:
     return user_input.lstrip().startswith("/")
 
 
+def _prompt_approval_decisions(interrupt_value: Any) -> list[dict[str, Any]]:
+    payload = interrupt_value if isinstance(interrupt_value, dict) else {}
+    action_requests = payload.get("action_requests")
+    if not isinstance(action_requests, list):
+        legacy_action = payload.get("action")
+        action_requests = [legacy_action] if legacy_action else []
+
+    decisions: list[dict[str, Any]] = []
+    for index, action in enumerate(action_requests, start=1):
+        action = action if isinstance(action, dict) else {}
+        reason = str(action.get("description") or action.get("reason") or "This action requires approval.")
+        summary = format_approval_summary(action, reason)
+        console.print(f"\n[bold yellow]Approval required[/bold yellow] [{index}/{len(action_requests)}] {summary}")
+        approved = Prompt.ask("Approve this action?", choices=["y", "n"], default="n")
+        if approved == "y":
+            decisions.append({"type": "approve"})
+        else:
+            decisions.append({"type": "reject", "message": "Action rejected by user."})
+    if not decisions:
+        decisions.append({"type": "reject", "message": "Action rejected by user."})
+    return decisions
+
+
 @app.command()
 def chat(
-    workspace: str = typer.Argument(".", help="代码智能体使用的工作区目录。"),
-    model: str | None = typer.Option(None, "--model", "-m", help="覆盖默认模型名称。"),
+    workspace: str = typer.Argument(".", help="Workspace directory for the code agent."),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override the default model name."),
 ) -> None:
-    """启动一个带工作区沙箱的交互式代码智能体。"""
+    """Start an interactive workspace-safe code agent."""
     try:
         resolved_workspace = str(Path(workspace).expanduser().resolve())
         Workspace(resolved_workspace)
@@ -233,7 +253,7 @@ def chat(
     )
     print_banner(session.workspace, session.model)
     if loaded_env:
-        console.print(f"[dim]已从 {env_path} 加载环境变量[/dim]")
+        console.print(f"[dim]Loaded environment variables from {env_path}[/dim]")
 
     graph = None
     while True:
@@ -253,16 +273,16 @@ def chat(
                 graph = build_graph(session.workspace, AgentConfig(model=session.model))
             except Exception as exc:
                 if "Missing credentials" in str(exc):
-                    console.print("[red]Graph 初始化失败:[/red] 缺少 DeepSeek 凭证。")
-                    console.print("请先在 .env 中设置 DEEPSEEK_API_KEY，或运行 /doctor 检查环境。")
+                    console.print("[red]Graph initialization failed[/red] Missing DeepSeek credentials.")
+                    console.print("Set DEEPSEEK_API_KEY in .env or run /doctor to inspect the environment.")
                 else:
-                    console.print(f"[red]Graph 初始化失败:[/red] {exc}")
-                    console.print("请运行 /doctor 检查依赖和环境变量。")
+                    console.print(f"[red]Graph initialization failed[/red] {exc}")
+                    console.print("Run /doctor to inspect dependencies and environment variables.")
                 continue
 
         session.interactions += 1
         config = {"configurable": {"thread_id": session.thread_id}}
-        console.print("[dim]Agent 已启动[/dim]")
+        console.print("[dim]Agent started[/dim]")
 
         try:
             final_answer = _run_graph_stream(graph, _initial_state(session, user_input), config)
@@ -273,14 +293,10 @@ def chat(
                     values = state.values
                     final_answer = values.get("final_answer") or values["messages"][-1].content
                     break
-                interrupt_value = interrupts[0].value
-                action = interrupt_value.get("action")
-                reason = interrupt_value.get("reason", "该操作需要确认。")
-                console.print(f"\n[bold yellow]需要审批[/bold yellow] {format_approval_summary(action, reason)}")
-                approved = Prompt.ask("是否批准这个 Level 2 操作？", choices=["y", "n"], default="n")
-                final_answer = _run_graph_stream(graph, Command(resume={"approved": approved == "y"}), config)
+                decisions = _prompt_approval_decisions(interrupts[0].value)
+                final_answer = _run_graph_stream(graph, Command(resume={"decisions": decisions}), config)
         except Exception as exc:
-            console.print(f"[red]Agent 错误:[/red] {exc}")
+            console.print(f"[red]Agent error:[/red] {exc}")
             continue
 
         state = graph.get_state(config)

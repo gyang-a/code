@@ -39,45 +39,25 @@ class PatchFileInput(BaseModel):
     path: str = Field(description="File path inside the workspace to edit.")
     old: str = Field(description="Exact text block to replace. It must appear exactly once.")
     new: str = Field(description="Replacement text block.")
-    approval_token: str | None = Field(
-        default=None,
-        description="Internal host approval token. Leave unset unless the host provides it.",
-    )
 
 
 class CreateFileInput(BaseModel):
     path: str = Field(description="New file path inside the workspace.")
     content: str = Field(description="Complete text content for the new file.")
-    approval_token: str | None = Field(
-        default=None,
-        description="Internal host approval token. Leave unset unless the host provides it.",
-    )
 
 
 class WriteFileInput(BaseModel):
     path: str = Field(description="File path inside the workspace to overwrite.")
     content: str = Field(description="Complete replacement text content.")
-    approval_token: str | None = Field(
-        default=None,
-        description="Internal host approval token. Leave unset unless the host provides it.",
-    )
 
 
 class DeleteFileInput(BaseModel):
     path: str = Field(description="File path inside the workspace to delete.")
-    approval_token: str | None = Field(
-        default=None,
-        description="Internal host approval token. Leave unset unless the host provides it.",
-    )
 
 
 class RunShellInput(BaseModel):
     command: str = Field(description="Shell command to run inside the workspace sandbox.")
     timeout_seconds: int = Field(default=60, ge=1, le=180, description="Command timeout in seconds.")
-    approval_token: str | None = Field(
-        default=None,
-        description="Internal host approval token. Leave unset unless the host provides it.",
-    )
 
 
 class GitDiffInput(BaseModel):

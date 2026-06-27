@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
 from code_agent.graph import (
-    build_tools,
+    _approval_interrupt_payload,
     _execute_node,
     _first_line,
-    _tool_message_for_pending,
+    _normalize_approval_decisions,
     _tool_call_is_write,
+    build_tools,
 )
 from code_agent.main import _is_slash_command, _parse_undo_args, _print_raw
 from code_agent.services.workspace import Workspace
@@ -42,11 +44,11 @@ class GraphRoutingTests(unittest.TestCase):
 
         print_mock.assert_called_once_with("diff contains [/not-open]", markup=False, highlight=False)
 
-    def test_approval_marker_must_be_first_line(self) -> None:
-        content = "# Code Agent\n\nAPPROVAL_REQUIRED[level_2]: docs mention this token"
+    def test_first_line_returns_first_content_line(self) -> None:
+        content = "# Code Agent\n\nlater content"
 
         self.assertEqual(_first_line(content), "# Code Agent")
-        self.assertFalse(_first_line(content).startswith("APPROVAL_REQUIRED[level_2]"))
+        self.assertFalse(_first_line(content).startswith("later"))
 
     def test_write_detection_depends_on_tool_name_not_file_content(self) -> None:
         self.assertTrue(_tool_call_is_write({"name": "patch_file", "args": {"path": "src/app.py"}}))
@@ -56,15 +58,25 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertFalse(_tool_call_is_write({"name": "run_shell", "args": {"command": "python -m pytest"}}))
         self.assertTrue(_tool_call_is_write({"name": "run_shell", "args": {"command": "npm install"}}))
 
-    def test_approval_followup_is_tool_message(self) -> None:
-        message = _tool_message_for_pending(
-            {"tool_call_id": "call_1", "tool_message_id": "tool-msg-1"},
-            content="APPROVED[level_2]: ok",
+    def test_approval_interrupt_payload_groups_all_action_requests(self) -> None:
+        payload = _approval_interrupt_payload(
+            [
+                {"name": "tool_a", "tool_call_id": "call_1", "args": {}, "reason": "one"},
+                {"name": "tool_b", "tool_call_id": "call_2", "args": {}, "reason": "two"},
+            ]
         )
 
-        self.assertEqual(message.type, "tool")
-        self.assertEqual(message.tool_call_id, "call_1")
-        self.assertEqual(message.id, "tool-msg-1")
+        self.assertEqual([request["tool_call_id"] for request in payload["action_requests"]], ["call_1", "call_2"])
+        self.assertEqual(len(payload["review_configs"]), 2)
+        self.assertIn("approve", payload["review_configs"][0]["allowed_decisions"])
+
+    def test_resume_decisions_are_normalized_per_action_request(self) -> None:
+        decisions = _normalize_approval_decisions(
+            {"decisions": [{"type": "approve"}, {"type": "reject", "message": "no"}]},
+            expected_count=2,
+        )
+
+        self.assertEqual(decisions, [{"type": "approve"}, {"type": "reject", "message": "no"}])
 
     def test_approval_summary_keeps_multiline_shell_command_to_one_line(self) -> None:
         summary = format_approval_summary(
@@ -74,7 +86,7 @@ class GraphRoutingTests(unittest.TestCase):
                     "command": 'python -c "\nprint(1)\nprint(2)\n"',
                 },
             },
-            "APPROVAL_REQUIRED[level_2]: 未知或中风险 shell 命令需要确认",
+            "Unknown or medium-risk shell command requires approval.",
             max_length=80,
         )
 
@@ -99,21 +111,21 @@ class GraphRoutingTests(unittest.TestCase):
 
     def test_shell_tool_result_summary_hides_command_body(self) -> None:
         summary = _tool_result_summary(
-            "ALLOWED[level_1]: 已允许低风险 shell 命令: node -e \"const fs = require('fs');\""
+            "ALLOWED[level_1]: allowed low-risk shell command: node -e \"const fs = require('fs');\""
         )
 
-        self.assertEqual(summary, "ALLOWED[level_1]: 已允许 shell 命令")
+        self.assertEqual(summary, "ALLOWED[level_1]: allowed shell command")
         self.assertNotIn("node -e", summary)
 
     def test_execute_node_is_independently_testable(self) -> None:
-        tool = FakeTool("echo_tool", "ok")
+        tool = FakeTool("list_files", "ok")
         state = {
             "messages": [
                 AIMessage(
                     content="",
                     tool_calls=[
                         {
-                            "name": "echo_tool",
+                            "name": "list_files",
                             "args": {"value": "hello"},
                             "id": "call_1",
                         }
@@ -122,7 +134,13 @@ class GraphRoutingTests(unittest.TestCase):
             ]
         }
 
-        update = _execute_node(state, tools_by_name={"echo_tool": tool}, max_tool_calls_per_turn=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            update = _execute_node(
+                state,
+                workspace=Workspace(tmp),
+                tools_by_name={"list_files": tool},
+                max_tool_calls_per_turn=2,
+            )
 
         self.assertEqual(tool.calls, [{"value": "hello"}])
         self.assertEqual(update["messages"][0].type, "tool")
@@ -142,14 +160,13 @@ class GraphRoutingTests(unittest.TestCase):
             ]
         }
 
-        update = _execute_node(state, tools_by_name={}, max_tool_calls_per_turn=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            update = _execute_node(state, workspace=Workspace(tmp), tools_by_name={}, max_tool_calls_per_turn=1)
 
         self.assertEqual(len(update["messages"]), 2)
         self.assertTrue(all(message.content.startswith("TOOL_LIMIT_EXCEEDED") for message in update["messages"]))
 
     def test_agent_toolset_does_not_expose_file_tree(self) -> None:
-        import tempfile
-
         with tempfile.TemporaryDirectory() as tmp:
             tool_names = {tool.name for tool in build_tools(Workspace(tmp))}
 
@@ -158,8 +175,6 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertNotIn("get_file_tree", tool_names)
 
     def test_tool_args_are_pydantic_schemas_with_descriptions(self) -> None:
-        import tempfile
-
         with tempfile.TemporaryDirectory() as tmp:
             tools = {tool.name: tool for tool in build_tools(Workspace(tmp))}
 
@@ -171,7 +186,54 @@ class GraphRoutingTests(unittest.TestCase):
         shell_schema = tools["run_shell"].args_schema.model_json_schema()
         self.assertIn("command", shell_schema["properties"])
         self.assertEqual(shell_schema["properties"]["timeout_seconds"]["maximum"], 180)
-        self.assertIn("Internal host approval token", shell_schema["properties"]["approval_token"]["description"])
+        internal_token_field = "approval" + "_token"
+        self.assertNotIn(internal_token_field, shell_schema["properties"])
+
+    def test_execute_node_interrupts_once_for_multiple_approval_decisions(self) -> None:
+        state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "custom_a", "args": {"value": "a"}, "id": "call_a"},
+                        {"name": "custom_b", "args": {"value": "b"}, "id": "call_b"},
+                        {"name": "custom_c", "args": {"value": "c"}, "id": "call_c"},
+                    ],
+                )
+            ]
+        }
+        tools = {
+            "custom_a": FakeTool("custom_a", "result a"),
+            "custom_b": FakeTool("custom_b", "result b"),
+            "custom_c": FakeTool("custom_c", "result c"),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "code_agent.graph.interrupt",
+                return_value={
+                    "decisions": [
+                        {"type": "approve"},
+                        {"type": "reject", "message": "do not run b"},
+                        {"type": "approve"},
+                    ]
+                },
+            ) as interrupt_mock:
+                update = _execute_node(
+                    state,
+                    workspace=Workspace(tmp),
+                    tools_by_name=tools,
+                    max_tool_calls_per_turn=3,
+                )
+
+        interrupt_mock.assert_called_once()
+        payload = interrupt_mock.call_args.args[0]
+        self.assertEqual([request["tool_call_id"] for request in payload["action_requests"]], ["call_a", "call_b", "call_c"])
+        self.assertEqual([message.tool_call_id for message in update["messages"]], ["call_a", "call_b", "call_c"])
+        self.assertEqual([message.content for message in update["messages"]], ["result a", "do not run b", "result c"])
+        self.assertEqual(tools["custom_a"].calls, [{"value": "a"}])
+        self.assertEqual(tools["custom_b"].calls, [])
+        self.assertEqual(tools["custom_c"].calls, [{"value": "c"}])
 
 
 class FakeTool:

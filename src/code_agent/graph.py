@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import subprocess
 from functools import partial
+from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
+
 from code_agent.config import AgentConfig
 from code_agent.prompts import SYSTEM_PROMPT
 from code_agent.services.context import compact_messages, should_compact_messages
 from code_agent.services.metadata import build_turn_metadata
+from code_agent.services.permissions import classify_tool_call
 from code_agent.services.sandbox import SandboxPolicy
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace
@@ -28,6 +31,23 @@ from code_agent.tools import (
     build_run_command_tool,
     build_search_text_tool,
     build_write_file_tool,
+)
+
+
+WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
+WRITE_COMMAND_PREFIXES = (
+    "npm install",
+    "npm i",
+    "pnpm add",
+    "pnpm install",
+    "yarn add",
+    "yarn install",
+    "pip install",
+    "python -m pip install",
+    "uv add",
+    "uv pip install",
+    "docker compose up",
+    "docker-compose up",
 )
 
 
@@ -60,6 +80,7 @@ def build_tools(
 def _execute_node(
     state: AgentState,
     *,
+    workspace: Workspace,
     tools_by_name: dict,
     max_tool_calls_per_turn: int,
 ):
@@ -81,22 +102,149 @@ def _execute_node(
             ]
         }
 
-    results = []
-    for tool_call in tool_calls:
+    reviews = [_review_tool_call(workspace, tools_by_name, tool_call) for tool_call in tool_calls]
+    action_requests = [review["action_request"] for review in reviews if review.get("requires_approval")]
+    decisions_by_id: dict[str, dict[str, Any]] = {}
+    if action_requests:
+        resume_value = interrupt(_approval_interrupt_payload(action_requests))
+        decisions = _normalize_approval_decisions(resume_value, len(action_requests))
+        decisions_by_id = {
+            str(action_request["tool_call_id"]): decision
+            for action_request, decision in zip(action_requests, decisions, strict=False)
+        }
+
+    results: list[ToolMessage] = []
+    for tool_call, review in zip(tool_calls, reviews, strict=False):
         tool_name = tool_call.get("name")
         tool_call_id = tool_call.get("id")
         args = dict(tool_call.get("args") or {})
         if not tool_call_id:
             continue
         if tool_name not in tools_by_name:
-            results.append(ToolMessage(content=f"ERROR: 未知工具: {tool_name}", tool_call_id=tool_call_id))
+            results.append(ToolMessage(content=f"ERROR: Unknown tool: {tool_name}", tool_call_id=tool_call_id))
             continue
-        try:
-            content = str(tools_by_name[tool_name].invoke(args))
-        except Exception as exc:
-            content = f"ERROR: 工具执行失败: {exc}"
-        results.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+        if review.get("blocked"):
+            results.append(ToolMessage(content=f"REJECTED[level_3]: {review['reason']}", tool_call_id=tool_call_id))
+            continue
+        if review.get("requires_approval"):
+            decision = decisions_by_id.get(str(tool_call_id), {"type": "reject", "message": "Action rejected."})
+            decision_type = str(decision.get("type") or "").lower()
+            if decision_type in {"approve", "approved", "accept"}:
+                pass
+            elif decision_type == "edit":
+                args = _edited_tool_args(args, decision)
+            else:
+                results.append(
+                    ToolMessage(
+                        content=_synthetic_tool_message_from_decision(decision),
+                        tool_call_id=tool_call_id,
+                    )
+                )
+                continue
+
+        results.append(ToolMessage(content=_invoke_tool(tools_by_name[tool_name], args), tool_call_id=tool_call_id))
+
     return {"messages": results}
+
+
+def _review_tool_call(workspace: Workspace, tools_by_name: dict, tool_call: dict) -> dict[str, Any]:
+    tool_name = str(tool_call.get("name") or "")
+    args = dict(tool_call.get("args") or {})
+    tool_call_id = str(tool_call.get("id") or "")
+    if tool_name not in tools_by_name:
+        return {}
+    try:
+        decision = classify_tool_call(workspace, tool_name, args)
+    except Exception as exc:
+        return {"blocked": True, "reason": str(exc)}
+
+    if decision.risk.value == "level_3" or (not decision.allowed and not decision.requires_approval):
+        return {"blocked": True, "reason": decision.reason}
+    if not decision.requires_approval:
+        return {}
+
+    return {
+        "requires_approval": True,
+        "action_request": {
+            "name": tool_name,
+            "tool": tool_name,
+            "args": args,
+            "description": decision.reason,
+            "reason": decision.reason,
+            "tool_call_id": tool_call_id,
+        },
+    }
+
+
+def _approval_interrupt_payload(action_requests: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "action_requests": action_requests,
+        "review_configs": [
+            {
+                "action_name": request["name"],
+                "tool_call_id": request["tool_call_id"],
+                "allowed_decisions": ["approve", "edit", "reject", "respond"],
+            }
+            for request in action_requests
+        ],
+    }
+
+
+def _normalize_approval_decisions(value: Any, expected_count: int) -> list[dict[str, Any]]:
+    if isinstance(value, dict) and isinstance(value.get("decisions"), list):
+        raw_decisions = value["decisions"]
+    elif isinstance(value, list):
+        raw_decisions = value
+    elif isinstance(value, dict) and "approved" in value:
+        decision_type = "approve" if value.get("approved") else "reject"
+        raw_decisions = [{"type": decision_type, "message": value.get("message")} for _ in range(expected_count)]
+    elif isinstance(value, bool):
+        raw_decisions = [{"type": "approve" if value else "reject"} for _ in range(expected_count)]
+    else:
+        raw_decisions = [value]
+
+    decisions = [_normalize_decision(decision) for decision in raw_decisions[:expected_count]]
+    while len(decisions) < expected_count:
+        decisions.append({"type": "reject", "message": "Action rejected."})
+    return decisions
+
+
+def _normalize_decision(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        normalized = dict(value)
+        normalized["type"] = str(normalized.get("type") or "reject").lower()
+        return normalized
+    if isinstance(value, str):
+        return {"type": value.lower()}
+    if isinstance(value, bool):
+        return {"type": "approve" if value else "reject"}
+    return {"type": "reject", "message": "Action rejected."}
+
+
+def _edited_tool_args(original_args: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(decision.get("args"), dict):
+        return dict(decision["args"])
+    edited_action = decision.get("edited_action")
+    if isinstance(edited_action, dict) and isinstance(edited_action.get("args"), dict):
+        return dict(edited_action["args"])
+    return dict(original_args)
+
+
+def _synthetic_tool_message_from_decision(decision: dict[str, Any]) -> str:
+    message = decision.get("message") or decision.get("content")
+    if message:
+        return str(message)
+    decision_type = str(decision.get("type") or "reject").lower()
+    if decision_type == "respond":
+        return "No tool execution. User response provided."
+    return "Action rejected by user."
+
+
+def _invoke_tool(tool, args: dict[str, Any]) -> str:
+    try:
+        return str(tool.invoke(args))
+    except Exception as exc:
+        return f"ERROR: Tool execution failed: {exc}"
 
 
 def _git_output(workspace: Workspace, args: list[str], timeout: int = 10) -> str:
@@ -127,23 +275,6 @@ def _recent_tool_messages(state: AgentState) -> list[ToolMessage]:
         if recent:
             break
     return list(reversed(recent))
-
-
-WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
-WRITE_COMMAND_PREFIXES = (
-    "npm install",
-    "npm i",
-    "pnpm add",
-    "pnpm install",
-    "yarn add",
-    "yarn install",
-    "pip install",
-    "python -m pip install",
-    "uv add",
-    "uv pip install",
-    "docker compose up",
-    "docker-compose up",
-)
 
 
 def build_graph(workspace_path: str, config: AgentConfig | None = None):
@@ -189,7 +320,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         if iteration_count > state.get("max_iterations", agent_config.max_iterations):
             return {
                 "iteration_count": iteration_count,
-                "final_answer": "已停止：Agent 达到最大工具循环次数。",
+                "final_answer": "Stopped: agent reached the maximum tool-iteration count.",
             }
         response = llm_with_tools.invoke(_messages_for_agent(state, workspace, agent_config.max_tool_calls_per_turn))
         update = {"messages": [response], "iteration_count": iteration_count}
@@ -235,39 +366,25 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         return END
 
     def tool_result_router(state: AgentState):
-        approval_reasons: list[str] = []
-        rejection_reasons: list[str] = []
         errors: list[str] = []
         changed_files = set(state.get("changed_files", []))
         did_write = bool(state.get("did_write"))
-        pending_approval = None
         tool_calls_by_id = _recent_tool_calls_by_id(state)
 
         for message in _recent_tool_messages(state):
             content = str(message.content)
             first_line = _first_line(content)
-            if first_line.startswith("APPROVAL_REQUIRED[level_2]"):
-                approval_reasons.append(first_line)
-                tool_call = tool_calls_by_id.get(message.tool_call_id)
-                if tool_call and pending_approval is None:
-                    pending_approval = {
-                        "tool": tool_call["name"],
-                        "args": dict(tool_call.get("args") or {}),
-                        "reason": first_line,
-                        "tool_call_id": message.tool_call_id,
-                        "tool_message_id": message.id,
-                    }
-            elif first_line.startswith("REJECTED[level_3]"):
-                rejection_reasons.append(first_line)
-            elif first_line.startswith("ERROR:"):
+            if first_line.startswith(("ERROR:", "REJECTED[")):
                 errors.append(first_line)
+
             tool_call = tool_calls_by_id.get(message.tool_call_id)
-            if _tool_call_is_write(tool_call):
+            if _tool_call_is_write(tool_call) and not first_line.startswith(("ERROR:", "REJECTED[")):
                 did_write = True
                 path_arg = _path_arg_from_tool_call(tool_call)
                 if path_arg:
                     changed_files.add(path_arg)
                 changed_files.update(_changed_files_from_git(workspace))
+
             if tool_call and tool_call.get("name") in {"run_command", "run_shell"} and first_line.startswith("ALLOWED["):
                 args = dict(tool_call.get("args") or {})
                 update_test_command = str(args.get("command") or "")
@@ -283,83 +400,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         if "test_command" in locals():
             update["test_command"] = test_command
             update["test_result"] = test_result
-        if approval_reasons:
-            update.update(
-                {
-                    "needs_approval": True,
-                    "approval_reason": "\n".join(approval_reasons),
-                    "pending_approval": pending_approval,
-                }
-            )
-        if rejection_reasons:
-            update.update({"rejected_reason": "\n".join(rejection_reasons)})
         return update
-
-    def route_tool_result(state: AgentState):
-        if state.get("approval_reason"):
-            return "approval"
-        if state.get("rejected_reason"):
-            return "reject"
-        return "context_manager"
-
-    def approval_node(state: AgentState):
-        reason = state.get("approval_reason") or "该操作需要确认。"
-        pending = state.get("pending_approval")
-        decision = interrupt(
-            {
-                "risk": "level_2",
-                "reason": reason,
-                "action": pending,
-            }
-        )
-        approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
-        if not approved:
-            return {
-                "messages": [
-                    _tool_message_for_pending(
-                        pending,
-                        content=(
-                            "DENIED[level_2]: User rejected the requested tool action.\n"
-                            f"{reason}\n"
-                            "Choose a safer alternative or explain that the action stopped."
-                        ),
-                    )
-                ],
-                "needs_approval": False,
-                "approval_reason": None,
-                "pending_approval": None,
-            }
-
-        execution_result = _execute_approved_tool(tools_by_name, pending)
-        did_write = bool(state.get("did_write") or _pending_action_is_write(pending))
-        changed_files = set(state.get("changed_files", []))
-        if did_write:
-            path_arg = _path_arg_from_pending(pending)
-            if path_arg:
-                changed_files.add(path_arg)
-            changed_files.update(_changed_files_from_git(workspace))
-        return {
-            "messages": [
-                _tool_message_for_pending(
-                    pending,
-                    content=(
-                        "APPROVED[level_2]: User approved the requested tool action.\n"
-                        f"{reason}\n"
-                        f"Execution result:\n{execution_result}"
-                    ),
-                )
-            ],
-            "needs_approval": False,
-            "approval_reason": None,
-            "pending_approval": None,
-            "did_write": did_write,
-            "changed_files": sorted(changed_files),
-        }
-
-    def reject_node(state: AgentState):
-        return {
-            "rejected_reason": None,
-        }
 
     def should_continue(state: AgentState):
         if state.get("final_answer"):
@@ -382,13 +423,12 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         "execute",
         partial(
             _execute_node,
+            workspace=workspace,
             tools_by_name=tools_by_name,
             max_tool_calls_per_turn=agent_config.max_tool_calls_per_turn,
         ),
     )
     graph.add_node("tool_result_router", tool_result_router)
-    graph.add_node("approval", approval_node)
-    graph.add_node("reject", reject_node)
 
     graph.add_edge(START, "agent")
     graph.add_conditional_edges(
@@ -400,17 +440,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         },
     )
     graph.add_edge("execute", "tool_result_router")
-    graph.add_conditional_edges(
-        "tool_result_router",
-        route_tool_result,
-        {
-            "approval": "approval",
-            "reject": "reject",
-            "context_manager": "context_manager",
-        },
-    )
-    graph.add_edge("approval", "context_manager")
-    graph.add_edge("reject", "context_manager")
+    graph.add_edge("tool_result_router", "context_manager")
     graph.add_conditional_edges(
         "context_manager",
         route_after_context,
@@ -471,7 +501,8 @@ def _messages_for_llm_with_context_summary(state: AgentState) -> list:
 
     summary_message = SystemMessage(
         content=(
-            "历史上下文摘要（由独立 summary LLM 压缩生成，仅作为继续任务的参考）：\n"
+            "Historical context summary generated by a separate summarizer. "
+            "Use it only as continuity context for the current task:\n"
             f"{summary}"
         )
     )
@@ -511,50 +542,21 @@ def _path_arg_from_tool_call(tool_call: dict | None) -> str | None:
     return str(value) if value else None
 
 
-def _path_arg_from_pending(pending: dict | None) -> str | None:
-    if not pending:
-        return None
-    args = dict(pending.get("args") or {})
-    value = args.get("path")
-    return str(value) if value else None
-
-
-def _pending_action_is_write(pending: dict | None) -> bool:
-    if not pending:
-        return False
-    return _tool_call_is_write(
-        {
-            "name": pending.get("tool"),
-            "args": dict(pending.get("args") or {}),
-        }
-    )
-
-
-def _tool_message_for_pending(pending: dict | None, *, content: str) -> ToolMessage:
-    pending = pending or {}
-    tool_call_id = str(pending.get("tool_call_id") or "unknown_tool_call")
-    message_id = pending.get("tool_message_id")
-    kwargs = {"content": content, "tool_call_id": tool_call_id}
-    if message_id:
-        kwargs["id"] = message_id
-    return ToolMessage(**kwargs)
-
-
 def _generate_context_summary(llm, compaction_material: str) -> str:
     try:
         response = llm.invoke(
             [
                 SystemMessage(
                     content=(
-                        "你是代码智能体的上下文压缩器，运行在独立会话中。\n"
-                        "请把输入材料压缩成中文工作摘要，供另一个主 Agent 继续任务。\n"
-                        "必须保留：用户目标、已经读过/改过的文件、关键工具结果、审批/拒绝信息、验证结果、剩余风险。\n"
-                        "不要输出寒暄，不要新增事实，不要假装执行了工具。"
+                        "You are a context compressor for a code agent. Summarize the provided "
+                        "history for another agent that will continue the same task. Preserve "
+                        "the user goal, files read or changed, important tool observations, "
+                        "rejections, validation results, and remaining risks. Do not invent facts."
                     )
                 ),
                 HumanMessage(
                     content=(
-                        "请压缩以下历史上下文材料：\n\n"
+                        "Summarize this conversation context:\n\n"
                         f"{truncate(compaction_material, 24000)}"
                     )
                 ),
@@ -575,17 +577,3 @@ def _recent_tool_calls_by_id(state: AgentState) -> dict[str, dict]:
                 if "id" in tool_call
             }
     return {}
-
-
-def _execute_approved_tool(tools_by_name: dict, pending: dict | None) -> str:
-    if not pending:
-        return "ERROR: 未找到待审批的 Level 2 操作。"
-    tool_name = pending.get("tool")
-    args = dict(pending.get("args") or {})
-    if tool_name not in tools_by_name:
-        return f"ERROR: 未知的待审批工具: {tool_name}"
-    args["approval_token"] = "approved"
-    try:
-        return str(tools_by_name[tool_name].invoke(args))
-    except Exception as exc:
-        return f"ERROR: 已审批工具执行失败: {exc}"

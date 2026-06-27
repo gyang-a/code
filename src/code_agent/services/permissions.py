@@ -83,10 +83,6 @@ READ_ONLY_TOOLS = {
 WRITE_TOOLS = {"patch_file", "create_file", "write_file", "delete_file"}
 
 
-def approval_required(risk: RiskLevel, reason: str) -> str:
-    return f"APPROVAL_REQUIRED[{risk.value}]: {reason}"
-
-
 def rejected(risk: RiskLevel, reason: str) -> str:
     return f"REJECTED[{risk.value}]: {reason}"
 
