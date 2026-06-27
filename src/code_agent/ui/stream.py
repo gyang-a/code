@@ -4,9 +4,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from rich.markup import escape
 
 from code_agent.services.summarizer import truncate
-from code_agent.ui.approval import format_approval_summary
+from code_agent.ui.approval import format_approval_summary, format_tool_call_summary
 from code_agent.ui.console import console
 
 
@@ -55,14 +56,17 @@ def _render_node_update(node_name: str, update: Mapping[str, Any]) -> None:
     if update.get("approval_reason"):
         console.print(
             f"[yellow]  需要审批:[/yellow] "
-            f"{format_approval_summary(update.get('pending_approval'), str(update['approval_reason']))}"
+            f"{escape(format_approval_summary(update.get('pending_approval'), str(update['approval_reason'])))}"
         )
 
     if update.get("rejected_reason"):
-        console.print(f"[red]  已拒绝:[/red] {update['rejected_reason']}")
+        console.print(f"[red]  已拒绝:[/red] {escape(str(update['rejected_reason']))}")
 
     if update.get("test_command"):
-        console.print(f"[dim]  验证命令: {update['test_command']}[/dim]")
+        summary = format_tool_call_summary("run_shell", {"command": update["test_command"]}, max_length=100)
+        console.print(
+            f"[dim]  验证命令: {escape(summary)}[/dim]"
+        )
 
     if update.get("test_result"):
         first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "验证完成"
@@ -83,20 +87,18 @@ def _render_messages(messages: list[BaseMessage]) -> None:
             for tool_call in tool_calls:
                 name = tool_call.get("name", "tool")
                 args = tool_call.get("args") or {}
-                console.print(f"[cyan]  工具调用:[/cyan] {name}({_format_args(args)})")
+                summary = format_tool_call_summary(name, args, max_length=100)
+                console.print(f"[cyan]  工具调用:[/cyan] {escape(summary)}")
             if message.content and not tool_calls:
                 console.print(f"[dim]  Agent 已生成回复草稿[/dim]")
         elif isinstance(message, ToolMessage):
             first_line = str(message.content).splitlines()[0] if str(message.content).strip() else "空工具结果"
             style = "yellow" if "APPROVAL_REQUIRED" in first_line else "red" if "REJECTED" in first_line else "dim"
-            console.print(f"[{style}]  工具结果:[/{style}] {truncate(first_line, 180)}")
+            console.print(f"[{style}]  工具结果:[/{style}] {escape(_tool_result_summary(first_line))}")
 
 
-def _format_args(args: Mapping[str, Any]) -> str:
-    parts = []
-    for key, value in args.items():
-        rendered = repr(value)
-        if len(rendered) > 80:
-            rendered = rendered[:77] + "..."
-        parts.append(f"{key}={rendered}")
-    return ", ".join(parts)
+def _tool_result_summary(first_line: str) -> str:
+    if first_line.startswith("ALLOWED[") and "shell" in first_line.lower():
+        prefix = first_line.split(":", 1)[0]
+        return f"{prefix}: 已允许 shell 命令"
+    return truncate(first_line, 180)

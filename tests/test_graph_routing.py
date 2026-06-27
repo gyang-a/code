@@ -14,7 +14,8 @@ from code_agent.graph import (
 )
 from code_agent.main import _is_slash_command, _parse_undo_args, _print_raw
 from code_agent.services.workspace import Workspace
-from code_agent.ui.approval import format_approval_summary
+from code_agent.ui.approval import format_approval_summary, format_tool_call_summary
+from code_agent.ui.stream import _tool_result_summary
 
 
 class GraphRoutingTests(unittest.TestCase):
@@ -80,6 +81,29 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertNotIn("\n", summary)
         self.assertIn("run_shell: python -c", summary)
         self.assertLessEqual(len(summary), 80)
+
+    def test_tool_call_summary_hides_multiline_shell_body(self) -> None:
+        summary = format_tool_call_summary(
+            "run_shell",
+            {
+                "command": "node -e \"\nconst fs = require('fs');\nconst html = fs.readFileSync('index.html', 'utf8');\n\"",
+                "timeout_seconds": 15,
+            },
+            max_length=70,
+        )
+
+        self.assertNotIn("\n", summary)
+        self.assertIn("run_shell: node -e", summary)
+        self.assertLessEqual(len(summary), 70)
+        self.assertNotIn("readFileSync", summary)
+
+    def test_shell_tool_result_summary_hides_command_body(self) -> None:
+        summary = _tool_result_summary(
+            "ALLOWED[level_1]: 已允许低风险 shell 命令: node -e \"const fs = require('fs');\""
+        )
+
+        self.assertEqual(summary, "ALLOWED[level_1]: 已允许 shell 命令")
+        self.assertNotIn("node -e", summary)
 
     def test_execute_node_is_independently_testable(self) -> None:
         tool = FakeTool("echo_tool", "ok")
