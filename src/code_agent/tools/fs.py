@@ -8,6 +8,15 @@ from code_agent.services.patcher import replace_exact_once
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.safety import approval_required, allowed, classify_tool_call, rejected
+from code_agent.tools.schemas import (
+    CreateFileInput,
+    DeleteFileInput,
+    FileTreeInput,
+    ListFilesInput,
+    PatchFileInput,
+    ReadFileInput,
+    WriteFileInput,
+)
 
 
 APPROVAL_TOKEN = "approved"
@@ -56,7 +65,7 @@ def build_read_file_tool(
     default_max_lines: int | None = None,
     output_limit: int | None = None,
 ):
-    @tool
+    @tool(args_schema=ReadFileInput)
     def read_file(path: str, start_line: int = 1, max_lines: int | None = None) -> str:
         """读取工作区内文本文件的一段内容；默认只返回有限行数，可用 start_line 继续读取。"""
         try:
@@ -75,7 +84,7 @@ def build_read_file_tool(
 
 
 def build_list_files_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=ListFilesInput)
     def list_files(path: str = ".") -> str:
         """列出工作区目录下的直接子项。"""
         try:
@@ -102,7 +111,7 @@ def build_list_files_tool(workspace: Workspace):
 
 
 def build_get_file_tree_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=FileTreeInput)
     def get_file_tree(path: str = ".", max_entries: int = 200) -> str:
         """返回工作区路径下有数量上限的文件树。"""
         try:
@@ -118,7 +127,7 @@ def build_get_file_tree_tool(workspace: Workspace):
 
 
 def build_patch_file_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=PatchFileInput)
     def patch_file(path: str, old: str, new: str, approval_token: str | None = None) -> str:
         """替换文件中的一个精确文本块；old 文本必须只出现一次。"""
         try:
@@ -141,7 +150,7 @@ def build_patch_file_tool(workspace: Workspace):
 
 
 def build_create_file_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=CreateFileInput)
     def create_file(path: str, content: str, approval_token: str | None = None) -> str:
         """在工作区内创建新的文本文件；如果文件已存在则拒绝。"""
         try:
@@ -159,7 +168,7 @@ def build_create_file_tool(workspace: Workspace):
 
 
 def build_write_file_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=WriteFileInput)
     def write_file(path: str, content: str, approval_token: str | None = None) -> str:
         """覆盖工作区内的小文本文件；编辑已有文件时优先使用 patch_file。"""
         try:
@@ -181,7 +190,7 @@ def build_write_file_tool(workspace: Workspace):
 
 
 def build_delete_file_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=DeleteFileInput)
     def delete_file(path: str, approval_token: str | None = None) -> str:
         """请求删除工作区文件；没有人工审批时不会删除。"""
         try:

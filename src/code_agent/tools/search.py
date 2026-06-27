@@ -8,6 +8,7 @@ from langchain_core.tools import tool
 
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
+from code_agent.tools.schemas import FindFilesInput, SearchTextInput
 
 
 def _should_skip(workspace: Workspace, path: Path) -> bool:
@@ -18,7 +19,7 @@ def _should_skip(workspace: Workspace, path: Path) -> bool:
 
 
 def build_search_text_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=SearchTextInput)
     def search_text(query: str, path: str = ".", max_results: int = 100) -> str:
         """在工作区内搜索文本；优先使用 ripgrep。"""
         try:
@@ -80,7 +81,7 @@ def build_search_text_tool(workspace: Workspace):
 
 
 def build_find_files_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=FindFilesInput)
     def find_files(pattern: str, path: str = ".", max_results: int = 200) -> str:
         """在工作区内按类似 glob 的模式查找文件。"""
         try:

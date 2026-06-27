@@ -157,6 +157,22 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertIn("find_files", tool_names)
         self.assertNotIn("get_file_tree", tool_names)
 
+    def test_tool_args_are_pydantic_schemas_with_descriptions(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = {tool.name: tool for tool in build_tools(Workspace(tmp))}
+
+        read_schema = tools["read_file"].args_schema.model_json_schema()
+        self.assertIn("path", read_schema["properties"])
+        self.assertIn("description", read_schema["properties"]["path"])
+        self.assertEqual(read_schema["properties"]["start_line"]["minimum"], 1)
+
+        shell_schema = tools["run_shell"].args_schema.model_json_schema()
+        self.assertIn("command", shell_schema["properties"])
+        self.assertEqual(shell_schema["properties"]["timeout_seconds"]["maximum"], 180)
+        self.assertIn("Internal host approval token", shell_schema["properties"]["approval_token"]["description"])
+
 
 class FakeTool:
     def __init__(self, name: str, response: str) -> None:

@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace
+from code_agent.tools.schemas import GitDiffInput
 
 
 def _run_git(workspace: Workspace, args: list[str], timeout: int = 10) -> str:
@@ -36,7 +37,7 @@ def build_git_status_tool(workspace: Workspace):
 
 
 def build_git_diff_tool(workspace: Workspace):
-    @tool
+    @tool(args_schema=GitDiffInput)
     def git_diff(path: str = ".") -> str:
         """显示整个工作区或指定路径的 git diff。"""
         try:

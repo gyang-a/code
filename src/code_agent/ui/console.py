@@ -1,16 +1,31 @@
 from __future__ import annotations
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
 
+BANNER_ART = """
+  CCCC      OOO     DDDDD      EEEEE
+ C        O     O   D     D    E
+C         O     O   D     D    EEEE
+ C        O     O   D     D    E
+  CCCC      OOO     DDDDD      EEEEE
+"""
+
 
 def print_banner(workspace: str, model: str) -> None:
     console.print(
         Panel.fit(
-            f"[bold]Code Agent[/bold]\n工作区: {workspace}\n模型: {model}\n输入 /help 查看命令。",
+            (
+                f"[cyan]{BANNER_ART}[/cyan]"
+                "\n[bold]Code Agent[/bold]\n"
+                f"工作区: {escape(workspace)}\n"
+                f"模型: {escape(model)}\n"
+                "输入 /help 查看命令。"
+            ),
             border_style="cyan",
         )
     )
