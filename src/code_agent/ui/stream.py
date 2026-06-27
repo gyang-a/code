@@ -10,20 +10,15 @@ from code_agent.ui.console import console
 
 
 NODE_LABELS = {
-    "load_project_context": "已加载项目上下文",
     "route_input": "已路由输入",
     "command_handler": "已处理 slash command",
-    "direct_response": "已直接回复",
-    "plan_node": "已生成任务计划",
-    "agent_loop": "Agent 正在思考",
+    "agent": "Agent 正在思考",
+    "context_manager": "已压缩历史上下文",
     "execute": "已执行工具调用",
     "tool_result_router": "已分类工具结果",
     "approval": "等待审批",
     "reject": "已处理拒绝操作",
     "observe": "已观察结果",
-    "validation_node": "已请求 Agent 决定验证方式",
-    "review_diff_node": "已检查 diff",
-    "final_summary": "已准备最终总结",
 }
 
 
@@ -32,6 +27,8 @@ def render_stream_chunk(chunk: Mapping[str, Any]) -> None:
         return
 
     for node_name, update in chunk.items():
+        if node_name == "context_manager" and not _context_update_compacted(update):
+            continue
         label = NODE_LABELS.get(node_name, node_name)
         console.print(f"[dim]> {label}[/dim]")
         if isinstance(update, Mapping):
@@ -54,10 +51,6 @@ def interrupt_from_chunk(chunk: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def _render_node_update(node_name: str, update: Mapping[str, Any]) -> None:
-    if node_name == "plan_node" and update.get("plan"):
-        for index, item in enumerate(update["plan"], start=1):
-            console.print(f"[dim]  {index}. {item}[/dim]")
-
     if update.get("messages"):
         _render_messages(update["messages"])
 
@@ -76,6 +69,13 @@ def _render_node_update(node_name: str, update: Mapping[str, Any]) -> None:
 
     if update.get("diff_summary"):
         console.print(f"[dim]  {update['diff_summary']}[/dim]")
+
+    if update.get("compaction_count"):
+        console.print(f"[dim]  上下文压缩次数: {update['compaction_count']}[/dim]")
+
+
+def _context_update_compacted(update: Any) -> bool:
+    return isinstance(update, Mapping) and bool(update.get("compaction_count"))
 
 
 def _render_messages(messages: list[BaseMessage]) -> None:

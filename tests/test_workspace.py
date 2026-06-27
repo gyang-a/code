@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 
 from code_agent.services.workspace import Workspace, WorkspaceError
+from code_agent.tools.fs import build_read_file_tool
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -29,6 +30,40 @@ class WorkspaceTests(unittest.TestCase):
 
             with self.assertRaises(WorkspaceError):
                 workspace.read_text("large.txt")
+
+    def test_read_text_window_can_read_large_file_by_lines(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            (tmp_path / "large.txt").write_text("\n".join(f"line {index}" for index in range(1, 6)), encoding="utf-8")
+            workspace = Workspace(tmp_path, read_limit=10, read_max_lines=2)
+
+            content = workspace.read_text_window("large.txt")
+
+            self.assertIn("LINES: 1-2", content)
+            self.assertIn("1: line 1", content)
+            self.assertIn("2: line 2", content)
+            self.assertIn("start_line=3", content)
+
+    def test_read_text_window_supports_start_line(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            (tmp_path / "app.py").write_text("a\nb\nc\n", encoding="utf-8")
+            workspace = Workspace(tmp_path, read_max_lines=2)
+
+            content = workspace.read_text_window("app.py", start_line=2)
+
+            self.assertIn("LINES: 2-3", content)
+            self.assertIn("2: b", content)
+            self.assertIn("3: c", content)
+
+    def test_read_file_tool_limits_lines_and_chars(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            (tmp_path / "data.txt").write_text("\n".join(["x" * 50, "y" * 50, "z" * 50]), encoding="utf-8")
+            workspace = Workspace(tmp_path)
+            read_file = build_read_file_tool(workspace, default_max_lines=3, output_limit=80)
+
+            content = read_file.invoke({"path": "data.txt"})
+
+            self.assertIn("FILE: data.txt", content)
+            self.assertIn("truncated", content)
 
 
 class TemporaryWorkspace:

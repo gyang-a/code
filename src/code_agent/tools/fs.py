@@ -50,15 +50,24 @@ def _git_diff_for(workspace: Workspace, path: str) -> str:
         return f"\n\nDiff 记录失败: {exc}"
 
 
-def build_read_file_tool(workspace: Workspace):
+def build_read_file_tool(
+    workspace: Workspace,
+    *,
+    default_max_lines: int | None = None,
+    output_limit: int | None = None,
+):
     @tool
-    def read_file(path: str) -> str:
-        """读取工作区内的文本文件；敏感文件、二进制文件和超大文件会被拒绝。"""
+    def read_file(path: str, start_line: int = 1, max_lines: int | None = None) -> str:
+        """读取工作区内文本文件的一段内容；默认只返回有限行数，可用 start_line 继续读取。"""
         try:
             decision = classify_tool_call(workspace, "read_file", {"path": path})
             if decision.risk.value == "level_3":
                 return rejected(decision.risk, decision.reason)
-            return workspace.read_text(path)
+            requested_lines = default_max_lines if max_lines is None else max_lines
+            if requested_lines is not None:
+                requested_lines = min(max(requested_lines, 1), 200)
+            content = workspace.read_text_window(path, start_line=start_line, max_lines=requested_lines)
+            return truncate(content, output_limit) if output_limit else content
         except WorkspaceError as exc:
             return _error(exc)
 

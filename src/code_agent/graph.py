@@ -8,11 +8,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
-
 from code_agent.config import AgentConfig
 from code_agent.prompts import SYSTEM_PROMPT
-from code_agent.services.memory import format_project_memory, load_project_memory
-from code_agent.services.planner import default_plan
+from code_agent.services.context import compact_messages, should_compact_messages
+from code_agent.services.metadata import build_turn_metadata
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace
 from code_agent.state import AgentState
@@ -33,11 +32,20 @@ from code_agent.tools import (
 from code_agent.tools.safety import describe_permission_policy
 
 
-def build_tools(workspace: Workspace):
+def build_tools(
+    workspace: Workspace,
+    *,
+    read_max_lines: int | None = None,
+    tool_output_limit: int | None = None,
+):
     return [
         build_list_files_tool(workspace),
         build_get_file_tree_tool(workspace),
-        build_read_file_tool(workspace),
+        build_read_file_tool(
+            workspace,
+            default_max_lines=read_max_lines,
+            output_limit=tool_output_limit,
+        ),
         build_search_text_tool(workspace),
         build_find_files_tool(workspace),
         build_patch_file_tool(workspace),
@@ -106,9 +114,14 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
     workspace = Workspace(
         workspace_path,
         read_limit=agent_config.file_read_limit,
+        read_max_lines=agent_config.file_read_max_lines,
         exclude_globs=agent_config.exclude_globs,
     )
-    tools = build_tools(workspace)
+    tools = build_tools(
+        workspace,
+        read_max_lines=agent_config.file_read_max_lines,
+        tool_output_limit=agent_config.tool_output_limit,
+    )
     tools_by_name = {tool.name: tool for tool in tools}
     llm_kwargs = {"temperature": 0}
     if agent_config.api_key:
@@ -118,27 +131,17 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         model_provider="deepseek",
         **llm_kwargs,
     )
+    summary_llm = init_chat_model(
+        agent_config.model,
+        model_provider="deepseek",
+        **llm_kwargs,
+    )
     llm_with_tools = llm.bind_tools(tools)
     tool_node = ToolNode(tools)
 
-    def load_project_context(state: AgentState):
-        tree = "\n".join(workspace.iter_tree(".", max_entries=80))
-        manifest_names = [
-            name
-            for name in ("README.md", "pyproject.toml", "package.json", "uv.lock", "pnpm-lock.yaml")
-            if (workspace.root / name).exists()
-        ]
-        context = (
-            f"工作区: {workspace.root}\n"
-            f"检测到的清单文件: {', '.join(manifest_names) or '无'}\n"
-            f"文件树:\n{tree}\n\n"
-            f"项目记忆:\n{format_project_memory(load_project_memory(workspace))}"
-        )
-        return {"project_context": context}
-
     def route_input(state: AgentState):
         user_goal = state["user_goal"].strip()
-        return {"input_kind": "slash_command" if user_goal.startswith("/") else "ai_routed"}
+        return {"input_kind": "slash_command" if user_goal.startswith("/") else "agent"}
 
     def command_handler(state: AgentState):
         command = state["user_goal"].strip().split(maxsplit=1)[0]
@@ -152,81 +155,60 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             answer = f"Slash command {command} 已由 CLI 控制层处理。"
         return {"final_answer": answer}
 
-    def direct_response(state: AgentState):
-        response = llm.invoke(
-            [
-                SystemMessage(
-                    content=(
-                        "你是一个 CLI 代码智能体的对话入口。"
-                        "对于不属于代码任务的消息，请直接、简短地用中文回答。"
-                        f"当前配置的模型名是 {agent_config.model}。"
-                        "不要检查文件，不要声称已经检查文件，也不要进行代码修改。"
-                    )
-                ),
-                HumanMessage(content=state["user_goal"]),
-            ]
-        )
-        return {"messages": [response], "final_answer": response.content}
-
-    def route_after_input(state: AgentState) -> str:
-        if state["user_goal"].strip().startswith("/"):
-            return "slash_command"
-        return _classify_user_intent(llm, state["user_goal"])
-
     def route_after_input_for_graph(state: AgentState) -> str:
-        intent = route_after_input(state)
-        if intent in {"casual_chat", "general_question"}:
-            return "direct_response"
-        if intent == "slash_command":
+        if state["user_goal"].strip().startswith("/"):
             return "command_handler"
-        return "load_project_context"
+        return "agent"
 
-    def plan_node(state: AgentState):
-        messages = list(state["messages"])
-        has_system = any(message.type == "system" for message in messages)
-        plan = state.get("plan") or _generate_task_plan(
-            llm,
-            project_context=state["project_context"] or "",
-            user_goal=state["user_goal"],
-        )
-        context_messages = []
-        if not has_system:
-            context_messages.append(SystemMessage(content=SYSTEM_PROMPT))
-            context_messages.append(
-                HumanMessage(
-                    content=(
-                        f"{state['project_context']}\n\n"
-                        f"任务: {state['user_goal']}\n\n"
-                        "AI 生成的执行计划：\n"
-                        + "\n".join(f"{index}. {item}" for index, item in enumerate(plan, start=1))
-                        + "\n\n请按计划推进。执行过程中如果发现计划不准确，可以根据工具结果调整。"
-                    )
-                )
-            )
-        return {
-            "messages": context_messages,
-            "plan": plan,
-        }
-
-    def agent_loop(state: AgentState):
+    def agent_node(state: AgentState):
         iteration_count = state.get("iteration_count", 0) + 1
         if iteration_count > state.get("max_iterations", agent_config.max_iterations):
             return {
                 "iteration_count": iteration_count,
                 "final_answer": "已停止：Agent 达到最大工具循环次数。",
             }
-        response = llm_with_tools.invoke(state["messages"])
-        return {"messages": [response], "iteration_count": iteration_count}
+        response = llm_with_tools.invoke(_messages_for_agent(state, workspace))
+        update = {"messages": [response], "iteration_count": iteration_count}
+        if not getattr(response, "tool_calls", None):
+            update["final_answer"] = response.content
+        return update
+
+    def context_manager(state: AgentState):
+        messages = list(state["messages"])
+        if _has_unanswered_tool_calls(messages):
+            return {}
+        if not should_compact_messages(
+            messages,
+            max_messages=agent_config.context_message_limit,
+            max_chars=agent_config.context_char_limit,
+        ):
+            return {}
+
+        compaction = compact_messages(
+            messages,
+            existing_summary=state.get("context_summary"),
+            changed_files=state.get("changed_files", []),
+            test_result=state.get("test_result"),
+            keep_recent=agent_config.context_keep_recent,
+        )
+        if not compaction.compacted:
+            return {}
+
+        summary = _generate_context_summary(summary_llm, compaction.context_summary)
+        return {
+            "messages": compaction.messages,
+            "context_summary": summary,
+            "recent_files": compaction.recent_files,
+            "compaction_count": state.get("compaction_count", 0) + 1,
+        }
 
     def after_agent(state: AgentState):
         if state.get("final_answer"):
-            return "final_summary"
+            return END
         last_message = state["messages"][-1]
         if getattr(last_message, "tool_calls", None):
             return "execute"
-        if _should_validate(state) and not state.get("validation_requested"):
-            return "validation_node"
-        return "review_diff_node"
+        return END
 
     def tool_result_router(state: AgentState):
         approval_reasons: list[str] = []
@@ -248,6 +230,8 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
                         "tool": tool_call["name"],
                         "args": dict(tool_call.get("args") or {}),
                         "reason": first_line,
+                        "tool_call_id": message.tool_call_id,
+                        "tool_message_id": message.id,
                     }
             elif first_line.startswith("REJECTED[level_3]"):
                 rejection_reasons.append(first_line)
@@ -308,12 +292,13 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         if not approved:
             return {
                 "messages": [
-                    HumanMessage(
+                    _tool_message_for_pending(
+                        pending,
                         content=(
-                            "用户拒绝了 Level 2 操作。\n"
+                            "DENIED[level_2]: User rejected the requested tool action.\n"
                             f"{reason}\n"
-                            "请选择更安全的替代方案，或明确说明已停止。"
-                        )
+                            "Choose a safer alternative or explain that the action stopped."
+                        ),
                     )
                 ],
                 "needs_approval": False,
@@ -331,12 +316,13 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             changed_files.update(_changed_files_from_git(workspace))
         return {
             "messages": [
-                HumanMessage(
+                _tool_message_for_pending(
+                    pending,
                     content=(
-                        "用户批准了 Level 2 操作。\n"
+                        "APPROVED[level_2]: User approved the requested tool action.\n"
                         f"{reason}\n"
-                        f"执行结果:\n{execution_result}"
-                    )
+                        f"Execution result:\n{execution_result}"
+                    ),
                 )
             ],
             "needs_approval": False,
@@ -347,17 +333,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         }
 
     def reject_node(state: AgentState):
-        reason = state.get("rejected_reason") or "操作已被安全策略拒绝。"
         return {
-            "messages": [
-                HumanMessage(
-                        content=(
-                        "上一个工具请求被判定为 Level 3 风险并已拒绝。\n"
-                        f"{reason}\n"
-                        "不要再次尝试该操作。请选择更安全的替代方案。"
-                    )
-                )
-            ],
             "rejected_reason": None,
         }
 
@@ -366,87 +342,28 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
 
     def should_continue(state: AgentState):
         if state.get("final_answer"):
-            return "final_summary"
+            return END
         last_message = state["messages"][-1]
         if last_message.type == "ai" and not getattr(last_message, "tool_calls", None):
-            if _should_validate(state) and not state.get("validation_requested"):
-                return "validation_node"
-            return "review_diff_node"
-        return "agent_loop"
+            return END
+        return "agent"
 
-    def validation_node(state: AgentState):
-        if not _should_validate(state):
-            return {"test_result": "已跳过验证：本轮没有修改文件。"}
-
-        prompt = HumanMessage(
-            content=(
-                "本轮已经发生文件修改。现在请你自己判断是否需要验证。\n"
-                "如果需要验证，请调用 run_shell 工具运行最相关的一条安全命令；"
-                "如果不需要或没有合适命令，请直接说明跳过原因，不要调用工具。\n\n"
-                "不要等待系统提供命令列表。请根据已读取到的项目文件和工具结果自己选择命令，"
-                "例如项目需要时可以尝试 pytest、uv run pytest、npm test、npm run build、pnpm test 等。"
-            )
-        )
-        return {
-            "messages": [prompt],
-            "validation_requested": True,
-        }
-
-    def review_diff_node(state: AgentState):
-        if not _should_validate(state):
-            return {
-                "changed_files": [],
-                "last_diff": None,
-                "diff_summary": "本轮未修改文件。",
-            }
-        diff = _git_output(workspace, ["diff", "--", "."], timeout=20)
-        changed_files = sorted(set(state.get("changed_files", [])) | set(_changed_files_from_git(workspace)))
-        return {
-            "changed_files": changed_files,
-            "last_diff": diff or None,
-            "diff_summary": _summarize_diff(changed_files, diff),
-        }
-
-    def final_summary(state: AgentState):
-        if state.get("final_answer"):
-            return {}
-
-        if not _should_validate(state):
-            final_prompt = HumanMessage(
-                content=(
-                    "现在生成最终中文回复。请直接回答用户最初的问题，并基于已经读取到的文件和工具结果说明你的判断。\n"
-                    "本轮没有修改文件，不要套用代码变更总结模板，不要声称运行了验证。"
-                )
-            )
-            response = llm.invoke([*state["messages"], final_prompt])
-            return {"messages": [response], "final_answer": response.content}
-
-        final_prompt = HumanMessage(
-            content=(
-                "现在生成最终中文回复。请包含：修改了哪些文件、改了什么、验证结果、剩余风险。\n\n"
-                f"变更文件: {', '.join(state.get('changed_files', [])) or '无'}\n"
-                f"验证结果: {state.get('test_result') or '未运行'}\n"
-                f"Diff 摘要: {state.get('diff_summary') or '无 diff'}"
-            )
-        )
-        response = llm.invoke([*state["messages"], final_prompt])
-        return {"messages": [response], "final_answer": response.content}
+    def route_after_context(state: AgentState):
+        last_message = state["messages"][-1]
+        if last_message.type == "ai":
+            return after_agent(state)
+        return should_continue(state)
 
     graph = StateGraph(AgentState)
-    graph.add_node("load_project_context", load_project_context)
     graph.add_node("route_input", route_input)
     graph.add_node("command_handler", command_handler)
-    graph.add_node("direct_response", direct_response)
-    graph.add_node("plan_node", plan_node)
-    graph.add_node("agent_loop", agent_loop)
+    graph.add_node("agent", agent_node)
+    graph.add_node("context_manager", context_manager)
     graph.add_node("execute", tool_node)
     graph.add_node("tool_result_router", tool_result_router)
     graph.add_node("approval", approval_node)
     graph.add_node("reject", reject_node)
     graph.add_node("observe", observe_node)
-    graph.add_node("validation_node", validation_node)
-    graph.add_node("review_diff_node", review_diff_node)
-    graph.add_node("final_summary", final_summary)
 
     graph.add_edge(START, "route_input")
     graph.add_conditional_edges(
@@ -454,22 +371,16 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         route_after_input_for_graph,
         {
             "command_handler": "command_handler",
-            "direct_response": "direct_response",
-            "load_project_context": "load_project_context",
+            "agent": "agent",
         },
     )
-    graph.add_edge("load_project_context", "plan_node")
     graph.add_edge("command_handler", END)
-    graph.add_edge("direct_response", END)
-    graph.add_edge("plan_node", "agent_loop")
     graph.add_conditional_edges(
-        "agent_loop",
+        "agent",
         after_agent,
         {
             "execute": "execute",
-            "validation_node": "validation_node",
-            "review_diff_node": "review_diff_node",
-            "final_summary": "final_summary",
+            END: END,
         },
     )
     graph.add_edge("execute", "tool_result_router")
@@ -484,19 +395,16 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
     )
     graph.add_edge("approval", "observe")
     graph.add_edge("reject", "observe")
+    graph.add_edge("observe", "context_manager")
     graph.add_conditional_edges(
-        "observe",
-        should_continue,
+        "context_manager",
+        route_after_context,
         {
-            "agent_loop": "agent_loop",
-            "validation_node": "validation_node",
-            "review_diff_node": "review_diff_node",
-            "final_summary": "final_summary",
+            "agent": "agent",
+            "execute": "execute",
+            END: END,
         },
     )
-    graph.add_edge("validation_node", "agent_loop")
-    graph.add_edge("review_diff_node", "final_summary")
-    graph.add_edge("final_summary", END)
 
     return graph.compile(checkpointer=InMemorySaver())
 
@@ -514,6 +422,54 @@ def _summarize_diff(changed_files: list[str], diff: str) -> str:
     file_summary = ", ".join(changed_files) if changed_files else "没有已跟踪文件的 diff。"
     line_count = len(diff.splitlines()) if diff else 0
     return f"变更文件: {file_summary}。Diff 行数: {line_count}。"
+
+
+def _messages_for_agent(state: AgentState, workspace: Workspace) -> list:
+    messages = _messages_with_context_summary(state)
+    system_message = SystemMessage(content=SYSTEM_PROMPT)
+    if messages and messages[0].type == "system":
+        prepared = list(messages)
+    else:
+        prepared = [system_message, *messages]
+
+    runtime_message = SystemMessage(
+        content=(
+            "Host-provided turn metadata follows. Treat it as current runtime context; "
+            "do not call tools just to rediscover these facts. Use tools only when you "
+            "need file contents, command output, or to make changes.\n\n"
+            f"{build_turn_metadata(workspace)}\n\n"
+            "Operational constraints:\n"
+            "- You are the agent node: choose whether to inspect, edit, validate, or answer.\n"
+            "- read_file returns a bounded line window by default; request later start_line values as needed.\n"
+            "- If you changed files, decide whether a focused validation command is useful before final answer.\n"
+            "- Stop and answer when the task is complete; the host enforces a max tool-iteration limit."
+        )
+    )
+    insert_at = 1 if prepared and prepared[0].type == "system" else 0
+    return [*prepared[:insert_at], runtime_message, *prepared[insert_at:]]
+
+
+def _messages_with_context_summary(state: AgentState) -> list:
+    messages = list(state["messages"])
+    summary = state.get("context_summary")
+    if not summary:
+        return messages
+
+    summary_message = SystemMessage(
+        content=(
+            "历史上下文摘要（由独立 summary LLM 压缩生成，仅作为继续任务的参考）：\n"
+            f"{summary}"
+        )
+    )
+    insert_at = 1 if messages and messages[0].type == "system" else 0
+    return [*messages[:insert_at], summary_message, *messages[insert_at:]]
+
+
+def _has_unanswered_tool_calls(messages: list) -> bool:
+    if not messages:
+        return False
+    last_message = messages[-1]
+    return last_message.type == "ai" and bool(getattr(last_message, "tool_calls", None))
 
 
 def _first_line(content: str) -> str:
@@ -560,53 +516,39 @@ def _pending_action_is_write(pending: dict | None) -> bool:
     )
 
 
-def _classify_user_intent(llm, user_goal: str) -> str:
-    response = llm.invoke(
-        [
-            SystemMessage(
-                content=(
-                    "请为 CLI 代码智能体判断用户消息意图。"
-                    "只返回一个标签：casual_chat、general_question 或 code_task。\n"
-                    "- casual_chat：问候、感谢、闲聊，或不需要检查工作区的普通对话。\n"
-                    "- general_question：关于助手、模型、使用方式、能力或概念的问题，不需要读取工作区。\n"
-                    "- code_task：要求检查、解释、修改、调试、测试、运行、搜索或推理工作区文件的请求。\n"
-                    "只能返回标签本身。"
-                )
-            ),
-            HumanMessage(content=user_goal),
-        ]
-    )
-    return _normalize_intent_label(str(response.content))
+def _tool_message_for_pending(pending: dict | None, *, content: str) -> ToolMessage:
+    pending = pending or {}
+    tool_call_id = str(pending.get("tool_call_id") or "unknown_tool_call")
+    message_id = pending.get("tool_message_id")
+    kwargs = {"content": content, "tool_call_id": tool_call_id}
+    if message_id:
+        kwargs["id"] = message_id
+    return ToolMessage(**kwargs)
 
 
-def _generate_task_plan(llm, *, project_context: str, user_goal: str) -> list[str]:
+def _generate_context_summary(llm, compaction_material: str) -> str:
     try:
         response = llm.invoke(
             [
                 SystemMessage(
                     content=(
-                        "你是 CLI 代码智能体的规划节点。"
-                        "请根据用户目标和项目上下文生成 3 到 6 步中文执行计划。"
-                        "计划必须针对当前任务，不要输出固定模板。"
-                        "每一步只写一句话，不要展开解释。"
-                        "不要使用工具，不要假装已经读取文件。"
+                        "你是代码智能体的上下文压缩器，运行在独立会话中。\n"
+                        "请把输入材料压缩成中文工作摘要，供另一个主 Agent 继续任务。\n"
+                        "必须保留：用户目标、已经读过/改过的文件、关键工具结果、审批/拒绝信息、验证结果、剩余风险。\n"
+                        "不要输出寒暄，不要新增事实，不要假装执行了工具。"
                     )
                 ),
                 HumanMessage(
                     content=(
-                        f"用户目标：{user_goal}\n\n"
-                        f"项目上下文：\n{project_context}\n\n"
-                        "请只输出步骤列表，每行一步。"
+                        "请压缩以下历史上下文材料：\n\n"
+                        f"{truncate(compaction_material, 24000)}"
                     )
                 ),
             ]
         )
-        plan = _parse_plan_lines(str(response.content))
-        if plan:
-            return plan
+        return truncate(str(response.content), 8000)
     except Exception:
-        pass
-    return default_plan(user_goal)
+        return truncate(compaction_material, 8000)
 
 
 def _parse_plan_lines(raw_plan: str) -> list[str]:

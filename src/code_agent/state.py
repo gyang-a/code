@@ -13,6 +13,9 @@ class AgentState(TypedDict):
     user_goal: str
     input_kind: str | None
     project_context: str | None
+    context_summary: str | None
+    recent_files: list[str]
+    compaction_count: int
 
     plan: list[str]
     current_step: str | None

@@ -7,6 +7,7 @@ from code_agent.graph import (
     _normalize_intent_label,
     _parse_plan_lines,
     _should_validate,
+    _tool_message_for_pending,
     _tool_call_is_write,
 )
 
@@ -44,3 +45,13 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertFalse(_tool_call_is_write({"name": "read_file", "args": {"path": "src/tools/fs.py"}}))
         self.assertFalse(_tool_call_is_write({"name": "run_shell", "args": {"command": "python -m pytest"}}))
         self.assertTrue(_tool_call_is_write({"name": "run_shell", "args": {"command": "npm install"}}))
+
+    def test_approval_followup_is_tool_message(self) -> None:
+        message = _tool_message_for_pending(
+            {"tool_call_id": "call_1", "tool_message_id": "tool-msg-1"},
+            content="APPROVED[level_2]: ok",
+        )
+
+        self.assertEqual(message.type, "tool")
+        self.assertEqual(message.tool_call_id, "call_1")
+        self.assertEqual(message.id, "tool-msg-1")

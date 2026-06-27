@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_MAX_ITERATIONS = 16
 DEFAULT_FILE_READ_LIMIT = 200_000
+DEFAULT_FILE_READ_MAX_LINES = 100
 DEFAULT_TOOL_OUTPUT_LIMIT = 12_000
+DEFAULT_CONTEXT_MESSAGE_LIMIT = 30
+DEFAULT_CONTEXT_CHAR_LIMIT = 60_000
+DEFAULT_CONTEXT_KEEP_RECENT = 12
 
 DEFAULT_EXCLUDE_GLOBS = (
     ".git/**",
@@ -48,5 +52,9 @@ class AgentConfig:
     api_key: str | None = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY"))
     max_iterations: int = DEFAULT_MAX_ITERATIONS
     file_read_limit: int = DEFAULT_FILE_READ_LIMIT
+    file_read_max_lines: int = DEFAULT_FILE_READ_MAX_LINES
     tool_output_limit: int = DEFAULT_TOOL_OUTPUT_LIMIT
+    context_message_limit: int = DEFAULT_CONTEXT_MESSAGE_LIMIT
+    context_char_limit: int = DEFAULT_CONTEXT_CHAR_LIMIT
+    context_keep_recent: int = DEFAULT_CONTEXT_KEEP_RECENT
     exclude_globs: tuple[str, ...] = field(default_factory=lambda: DEFAULT_EXCLUDE_GLOBS)
