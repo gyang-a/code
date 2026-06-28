@@ -28,9 +28,6 @@ def format_tool_call_summary(
 
 
 def _action_detail(tool_name: str, args: Mapping[str, Any]) -> str | None:
-    if tool_name in {"run_shell", "run_command"}:
-        return _single_line(args.get("command"))
-
     path = args.get("path")
     if path:
         return _single_line(path)

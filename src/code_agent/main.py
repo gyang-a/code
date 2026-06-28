@@ -12,13 +12,17 @@ from typing import Any
 from collections.abc import Mapping
 
 import typer
-from langchain_core.messages import BaseMessage
-from langgraph.types import Command
 from rich.prompt import Prompt
 
 from code_agent.config import AgentConfig, DEFAULT_MODEL
 from code_agent.services.env import load_dotenv
-from code_agent.services.sandbox import describe_sandbox_policy
+from code_agent.services.persistence import (
+    list_sessions,
+    open_project_checkpointer,
+    record_session,
+    SessionRecord,
+)
+from code_agent.services.skills import SkillStore, format_pending_summary, format_skill_index
 from code_agent.services.summarizer import truncate
 from code_agent.services.usage import (
     TokenUsage,
@@ -27,12 +31,10 @@ from code_agent.services.usage import (
     usage_from_messages,
 )
 from code_agent.services.workspace import Workspace, WorkspaceError
-from code_agent.tools.safety import describe_permission_policy
 from code_agent.ui.approval import format_approval_summary
 from code_agent.ui.console import console, print_banner, print_help
-from code_agent.ui.stream import final_answer_from_chunk, interrupt_from_chunk, render_stream_chunk
 
-app = typer.Typer(no_args_is_help=True)
+app = typer.Typer()
 
 
 @dataclass
@@ -45,6 +47,7 @@ class Session:
     tool_loops: int = 0
     context_compressions: int = 0
     last_context_tokens: int = 0
+    skill_reviewed_tool_count: int = 0
     model_usage: TokenUsage = field(default_factory=TokenUsage)
 
     def reset(self) -> None:
@@ -53,7 +56,13 @@ class Session:
         self.tool_loops = 0
         self.context_compressions = 0
         self.last_context_tokens = 0
+        self.skill_reviewed_tool_count = 0
         self.model_usage = TokenUsage()
+
+
+def _resolve_chat_workspace(workspace: str) -> str:
+    raw_workspace = workspace.strip() if workspace else "."
+    return str(Path(raw_workspace).expanduser().resolve())
 
 
 def _initial_state(session: Session, user_input: str) -> dict:
@@ -65,8 +74,6 @@ def _initial_state(session: Session, user_input: str) -> dict:
         "user_goal": user_input,
         "changed_files": [],
         "did_write": False,
-        "test_command": None,
-        "test_result": None,
         "tool_errors": [],
         "final_answer": None,
     }
@@ -149,7 +156,6 @@ def _doctor(workspace: str) -> None:
         (".env", "found" if env_path.exists() else "missing"),
         ("DEEPSEEK_API_KEY", "set" if os.getenv("DEEPSEEK_API_KEY") else "missing"),
         ("CODE_AGENT_MODEL", os.getenv("CODE_AGENT_MODEL") or "unset"),
-        ("shell_sandbox", describe_sandbox_policy()),
         ("git", "found" if shutil.which("git") else "missing"),
         ("rg", "found" if shutil.which("rg") else "missing"),
         ("langgraph", "found" if importlib.util.find_spec("langgraph") else "missing"),
@@ -184,6 +190,8 @@ def _handle_slash(command: str, session: Session) -> bool:
         console.print(f"model: {session.model}")
         console.print(f"interactions: {session.interactions}")
     elif name == "/tools":
+        from code_agent.services.permissions import describe_permission_policy
+
         _print_raw(describe_permission_policy())
     elif name == "/diff":
         diff = _run_git_diff(session.workspace)
@@ -208,12 +216,115 @@ def _handle_slash(command: str, session: Session) -> bool:
         console.print(f"interactions: {session.interactions}")
         console.print(f"thread_id: {session.thread_id}")
         _print_usage(session)
+    elif name == "/skills":
+        _handle_skills_command(arg)
+    elif name == "/resume":
+        _handle_resume_command(session, arg)
+    elif name == "/sessions":
+        _handle_sessions_command(session.workspace)
     elif name == "/mcp":
         console.print("MCP integration is not configured in this MVP.")
     else:
         console.print(f"Unknown slash command: {name}. Type /help to list commands.")
 
     return True
+
+
+def _handle_skills_command(arg: str) -> None:
+    store = SkillStore()
+    parts = shlex.split(arg, posix=False) if arg else []
+    command = parts[0].lower() if parts else "list"
+
+    try:
+        if command in {"list", "ls"}:
+            _print_raw(format_skill_index(store.list_skills()))
+        elif command == "path":
+            _print_raw(f"skills: {store.skills_dir}\npending: {store.pending_dir}")
+        elif command == "pending":
+            _print_raw(format_pending_summary(store.list_pending()))
+        elif command == "view" and len(parts) >= 2:
+            _print_raw(store.read_skill(parts[1].strip("\"'")))
+        elif command == "diff" and len(parts) >= 2:
+            _print_raw(store.pending_diff(parts[1].strip("\"'")))
+        elif command == "approve" and len(parts) >= 2:
+            change = store.approve_pending(parts[1].strip("\"'"))
+            _print_raw(f"Approved {change.id}; wrote global skill: {change.skill_name}")
+        elif command == "reject" and len(parts) >= 2:
+            change = store.reject_pending(parts[1].strip("\"'"))
+            _print_raw(f"Rejected pending skill change: {change.id}")
+        else:
+            _print_raw(
+                "Usage: /skills [list|path|pending|view <name>|diff <id>|approve <id>|reject <id>]"
+            )
+    except Exception as exc:
+        _print_raw(f"ERROR: {exc}")
+
+
+def _handle_sessions_command(workspace: str) -> None:
+    records = list_sessions(workspace)
+    _print_raw(_format_sessions(records))
+
+
+def _handle_resume_command(session: Session, arg: str) -> None:
+    thread_id = _select_session_thread_id(session.workspace, requested=arg.strip() or None)
+    if thread_id is None:
+        return
+
+    session.thread_id = thread_id
+    session.interactions = 0
+    session.tool_loops = 0
+    session.context_compressions = 0
+    session.last_context_tokens = 0
+    session.skill_reviewed_tool_count = 0
+    session.model_usage = TokenUsage()
+    console.print(f"[dim]Resumed thread: {session.thread_id}[/dim]")
+
+
+def _select_session_thread_id(workspace: str, *, requested: str | None = None) -> str | None:
+    records = list_sessions(workspace)
+    _print_raw(_format_sessions(records))
+    if not records:
+        return
+
+    choice = requested
+    if not choice:
+        choice = Prompt.ask("Thread id, prefix, or number to resume").strip()
+    thread_id = _resolve_session_choice(records, choice)
+    if thread_id is None:
+        _print_raw(f"ERROR: Unknown or ambiguous session: {choice}")
+        return None
+    return thread_id
+
+
+def _format_sessions(records: list[SessionRecord]) -> str:
+    if not records:
+        return "No saved sessions for this workspace."
+
+    lines = ["Saved sessions:"]
+    for index, record in enumerate(records, start=1):
+        lines.append(f"{index}. {record.thread_id}  {record.updated_at}  {record.title}")
+    return "\n".join(lines)
+
+
+def _resolve_session_choice(records: list[SessionRecord], choice: str) -> str | None:
+    normalized = choice.strip()
+    if not normalized:
+        return None
+
+    if normalized.isdigit():
+        index = int(normalized)
+        if 1 <= index <= len(records):
+            return records[index - 1].thread_id
+
+    exact = [record.thread_id for record in records if record.thread_id == normalized]
+    if len(exact) == 1:
+        return exact[0]
+
+    prefix = [record.thread_id for record in records if record.thread_id.startswith(normalized)]
+    if len(prefix) == 1:
+        return prefix[0]
+
+    return None
 
 
 def _is_slash_command(user_input: str) -> bool:
@@ -233,12 +344,6 @@ def _prompt_approval_decisions(interrupt_value: Any) -> list[dict[str, Any]]:
         reason = str(action.get("description") or action.get("reason") or "This action requires approval.")
         summary = format_approval_summary(action, reason)
         console.print(f"\n[bold yellow]Approval required[/bold yellow] [{index}/{len(action_requests)}] {summary}")
-        if action.get("name") in {"run_shell", "run_command"} or action.get("tool") in {"run_shell", "run_command"}:
-            console.print(
-                "[yellow]  This approves the entire shell command. "
-                "Package downloads, scaffolding, and child commands inside it will not prompt separately. "
-                "File inspection/editing should use dedicated tools, not shell.[/yellow]"
-            )
         approved = Prompt.ask("Approve this action?", choices=["y", "n"], default="n")
         if approved == "y":
             decisions.append({"type": "approve"})
@@ -250,17 +355,22 @@ def _prompt_approval_decisions(interrupt_value: Any) -> list[dict[str, Any]]:
 
 
 @app.command()
-def chat(
+def main(
     workspace: str = typer.Argument(".", help="Workspace directory for the code agent."),
     model: str | None = typer.Option(None, "--model", "-m", help="Override the default model name."),
 ) -> None:
     """Start an interactive workspace-safe code agent."""
-    try:
-        resolved_workspace = str(Path(workspace).expanduser().resolve())
-        Workspace(resolved_workspace)
-    except WorkspaceError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    session, env_path, loaded_env = _create_session(workspace, model=model)
+    _run_interactive_session(session, env_path=env_path, loaded_env=loaded_env, resumed=False)
 
+
+def _create_session(
+    workspace: str,
+    *,
+    model: str | None,
+    thread_id: str | None = None,
+) -> tuple[Session, Path, bool]:
+    resolved_workspace = _validate_workspace(workspace)
     env_path = Path(resolved_workspace) / ".env"
     loaded_env = load_dotenv(env_path)
     selected_model = model or os.getenv("CODE_AGENT_MODEL", DEFAULT_MODEL)
@@ -268,71 +378,100 @@ def chat(
         workspace=resolved_workspace,
         model=selected_model,
         env_file=str(env_path) if loaded_env else None,
+        thread_id=thread_id or str(uuid.uuid4()),
     )
+    return session, env_path, loaded_env
+
+
+def _validate_workspace(workspace: str) -> str:
+    try:
+        resolved_workspace = _resolve_chat_workspace(workspace)
+        Workspace(resolved_workspace)
+    except WorkspaceError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return resolved_workspace
+
+
+def _run_interactive_session(
+    session: Session,
+    *,
+    env_path: Path,
+    loaded_env: bool,
+    resumed: bool,
+) -> None:
     print_banner(session.workspace, session.model)
-    console.print(f"[dim]shell sandbox: {describe_sandbox_policy()}[/dim]")
+    console.print(f"[dim]{'Resumed' if resumed else 'Started'} thread: {session.thread_id}[/dim]")
     if loaded_env:
         console.print(f"[dim]Loaded environment variables from {env_path}[/dim]")
 
-    graph = None
-    while True:
-        user_input = Prompt.ask("\n[bold cyan]you[/bold cyan]").strip()
-        if not user_input:
-            continue
-
-        if _is_slash_command(user_input):
-            if not _handle_slash(user_input, session):
-                break
-            continue
-
-        if graph is None:
-            try:
-                from code_agent.graph import build_graph
-
-                graph = build_graph(session.workspace, AgentConfig(model=session.model))
-            except Exception as exc:
-                if "Missing credentials" in str(exc):
-                    console.print("[red]Graph initialization failed[/red] Missing DeepSeek credentials.")
-                    console.print("Set DEEPSEEK_API_KEY in .env or run /doctor to inspect the environment.")
-                else:
-                    console.print(f"[red]Graph initialization failed[/red] {exc}")
-                    console.print("Run /doctor to inspect dependencies and environment variables.")
+    with open_project_checkpointer(session.workspace) as checkpointer:
+        graph = None
+        while True:
+            user_input = Prompt.ask("\n[bold cyan]you[/bold cyan]").strip()
+            if not user_input:
                 continue
 
-        session.interactions += 1
-        config = {"configurable": {"thread_id": session.thread_id}}
-        console.print("[dim]Agent started[/dim]")
-
-        try:
-            final_answer = _run_graph_stream(graph, _initial_state(session, user_input), config, session)
-            while final_answer is None:
-                state = graph.get_state(config)
-                interrupts = state.interrupts
-                if not interrupts:
-                    values = state.values
-                    final_answer = values.get("final_answer") or values["messages"][-1].content
+            if _is_slash_command(user_input):
+                if not _handle_slash(user_input, session):
                     break
-                decisions = _prompt_approval_decisions(interrupts[0].value)
-                if any(decision.get("type") in {"approve", "edit"} for decision in decisions):
-                    console.print(
-                        "[dim]Executing approved action(s). "
-                        "Long-running shell output is captured and shown when the tool finishes.[/dim]"
-                    )
-                final_answer = _run_graph_stream(graph, Command(resume={"decisions": decisions}), config, session)
-        except Exception as exc:
-            console.print(f"[red]Agent error:[/red] {exc}")
-            continue
+                continue
 
-        state = graph.get_state(config)
-        session.tool_loops += state.values.get("run_model_call_count", 0)
-        session.last_context_tokens = estimate_message_tokens(state.values.get("messages", []))
-        answer = final_answer or state.values.get("final_answer") or state.values["messages"][-1].content
-        console.print("\n[bold green]Agent[/bold green]")
-        _print_raw(str(answer))
-        _print_usage(session)
+            if graph is None:
+                try:
+                    from code_agent.graph import build_graph
+
+                    graph = build_graph(
+                        session.workspace,
+                        AgentConfig(model=session.model),
+                        checkpointer=checkpointer,
+                    )
+                except Exception as exc:
+                    if "Missing credentials" in str(exc):
+                        console.print("[red]Graph initialization failed[/red] Missing DeepSeek credentials.")
+                        console.print("Set DEEPSEEK_API_KEY in .env or run /doctor to inspect the environment.")
+                    else:
+                        console.print(f"[red]Graph initialization failed[/red] {exc}")
+                        console.print("Run /doctor to inspect dependencies and environment variables.")
+                    continue
+
+            record_session(session.workspace, session.thread_id, title=user_input)
+            session.interactions += 1
+            config = {"configurable": {"thread_id": session.thread_id}}
+            console.print("[dim]Agent started[/dim]")
+
+            try:
+                final_answer = _run_graph_stream(graph, _initial_state(session, user_input), config, session)
+                while final_answer is None:
+                    state = graph.get_state(config)
+                    interrupts = state.interrupts
+                    if not interrupts:
+                        values = state.values
+                        final_answer = values.get("final_answer") or values["messages"][-1].content
+                        break
+                    decisions = _prompt_approval_decisions(interrupts[0].value)
+                    if any(decision.get("type") in {"approve", "edit"} for decision in decisions):
+                        console.print("[dim]Executing approved action(s).[/dim]")
+                    from langgraph.types import Command
+
+                    final_answer = _run_graph_stream(graph, Command(resume={"decisions": decisions}), config, session)
+            except Exception as exc:
+                console.print(f"[red]Agent error:[/red] {exc}")
+                continue
+
+            state = graph.get_state(config)
+            record_session(session.workspace, session.thread_id)
+            session.tool_loops += state.values.get("run_model_call_count", 0)
+            session.last_context_tokens = estimate_message_tokens(state.values.get("messages", []))
+            answer = final_answer or state.values.get("final_answer") or state.values["messages"][-1].content
+            console.print("\n[bold green]Agent[/bold green]")
+            _print_raw(str(answer))
+            _maybe_review_skills(session, state.values)
+            _print_usage(session)
 
 
 def _run_graph_stream(graph, graph_input, config: dict, session: Session | None = None) -> str | None:
+    from code_agent.ui.stream import final_answer_from_chunk, interrupt_from_chunk, render_stream_chunk
+
     final_answer = None
     for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
         if session is not None:
@@ -348,6 +487,8 @@ def _run_graph_stream(graph, graph_input, config: dict, session: Session | None 
 
 
 def _update_usage_from_chunk(session: Session, chunk: Mapping[str, Any]) -> None:
+    from langchain_core.messages import BaseMessage
+
     for node_name, update in chunk.items():
         if isinstance(update, Mapping):
             messages = update.get("messages")
@@ -369,6 +510,40 @@ def _print_usage(session: Session) -> None:
     console.print(
         f"[dim]{format_usage_line(context_tokens=session.last_context_tokens, model_usage=session.model_usage, compression_count=session.context_compressions)}[/dim]"
     )
+
+
+def _maybe_review_skills(session: Session, state_values: Mapping[str, Any]) -> None:
+    from langchain_core.messages import BaseMessage
+    from code_agent.services.skill_review import (
+        count_tool_results,
+        review_turn_for_skills,
+        should_review_skills,
+    )
+
+    messages = [
+        message
+        for message in state_values.get("messages", [])
+        if isinstance(message, BaseMessage)
+    ]
+    if not should_review_skills(
+        messages,
+        reviewed_tool_count=session.skill_reviewed_tool_count,
+    ):
+        return
+
+    console.print("[dim]Reviewing recent work for reusable skill updates...[/dim]")
+    result = review_turn_for_skills(
+        messages=messages,
+        config=AgentConfig(model=session.model),
+        thread_id=session.thread_id,
+        project_folder_name=Path(session.workspace).name,
+        reviewed_tool_count=session.skill_reviewed_tool_count,
+    )
+    session.skill_reviewed_tool_count = count_tool_results(messages)
+    if result.status == "staged":
+        console.print(f"[dim]{result.message} Use /skills diff {result.pending_id} to inspect.[/dim]")
+    elif result.status == "error":
+        console.print(f"[dim]{result.message}[/dim]")
 
 
 if __name__ == "__main__":

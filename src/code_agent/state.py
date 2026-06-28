@@ -15,8 +15,5 @@ class AgentState(TypedDict, total=False):
     changed_files: NotRequired[list[str]]
     did_write: NotRequired[bool]
 
-    test_command: NotRequired[str | None]
-    test_result: NotRequired[str | None]
-
     tool_errors: NotRequired[list[str]]
     final_answer: NotRequired[str | None]

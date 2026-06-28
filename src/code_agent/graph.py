@@ -20,7 +20,7 @@ from code_agent.config import AgentConfig
 from code_agent.prompts import SYSTEM_PROMPT
 from code_agent.services.metadata import build_turn_metadata
 from code_agent.services.permissions import classify_tool_call
-from code_agent.services.sandbox import describe_sandbox_policy
+from code_agent.services.skills import SkillStore, format_skill_index
 from code_agent.services.workspace import Workspace
 from code_agent.state import AgentState
 from code_agent.tools import (
@@ -32,8 +32,9 @@ from code_agent.tools import (
     build_list_files_tool,
     build_patch_file_tool,
     build_read_file_tool,
-    build_run_command_tool,
     build_search_text_tool,
+    build_skill_view_tool,
+    build_skills_list_tool,
     build_write_file_tool,
 )
 
@@ -43,7 +44,6 @@ def build_tools(
     *,
     read_max_lines: int | None = None,
     tool_output_limit: int | None = None,
-    allow_requires_approval_tools: bool = False,
 ):
     return [
         build_list_files_tool(workspace),
@@ -58,16 +58,14 @@ def build_tools(
         build_create_file_tool(workspace),
         build_write_file_tool(workspace),
         build_delete_file_tool(workspace),
-        build_run_command_tool(
-            workspace,
-            allow_requires_approval=allow_requires_approval_tools,
-        ),
+        build_skills_list_tool(workspace),
+        build_skill_view_tool(workspace),
         build_git_status_tool(workspace),
         build_git_diff_tool(workspace),
     ]
 
 
-def build_graph(workspace_path: str, config: AgentConfig | None = None):
+def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpointer=None):
     agent_config = config or AgentConfig()
     workspace = Workspace(
         workspace_path,
@@ -79,7 +77,6 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         workspace,
         read_max_lines=agent_config.file_read_max_lines,
         tool_output_limit=agent_config.tool_output_limit,
-        allow_requires_approval_tools=True,
     )
     llm_kwargs = {"temperature": 0}
     if agent_config.api_key:
@@ -93,7 +90,6 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         middleware=[
             RuntimeMetadataMiddleware(
                 workspace=workspace,
-                shell_sandbox=describe_sandbox_policy(),
                 max_tool_calls_per_turn=agent_config.max_tool_calls_per_turn,
             ),
             HumanInTheLoopMiddleware(
@@ -118,7 +114,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
             ),
         ],
         state_schema=AgentState,
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer or InMemorySaver(),
     )
 
 
@@ -127,12 +123,10 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
         self,
         *,
         workspace: Workspace,
-        shell_sandbox: str,
         max_tool_calls_per_turn: int,
     ) -> None:
         super().__init__()
         self.workspace = workspace
-        self.shell_sandbox = shell_sandbox
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
 
     def wrap_model_call(
@@ -143,10 +137,13 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
         base = request.system_message.text if request.system_message else SYSTEM_PROMPT
         runtime_metadata = (
             "Runtime metadata:\n"
-            "The host provides the current workspace snapshot below. Treat it as current context, "
+            "The host provides the current project folder snapshot below. Treat it as current context, "
             "not as conversation history.\n\n"
             f"{build_turn_metadata(self.workspace)}\n\n"
-            f"Shell sandbox: {self.shell_sandbox}.\n"
+            "Available global skills:\n"
+            f"{format_skill_index(SkillStore().list_skills())}\n\n"
+            "Use skill_view only when a listed skill is relevant to the current user request.\n\n"
+            "Command execution: unavailable to the agent.\n"
             f"Tool call budget hint: prefer at most {self.max_tool_calls_per_turn} tool calls per model turn."
         )
         return handler(

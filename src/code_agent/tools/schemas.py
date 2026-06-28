@@ -4,12 +4,12 @@ from pydantic import BaseModel, Field
 
 
 class ListFilesInput(BaseModel):
-    path: str = Field(default=".", description="Directory path inside the workspace to list.")
+    path: str = Field(default=".", description="Directory path inside the current project folder to list.")
     max_entries: int = Field(default=200, ge=1, le=1000, description="Maximum visible entries to return.")
 
 
 class ReadFileInput(BaseModel):
-    path: str = Field(description="Text file path inside the workspace.")
+    path: str = Field(description="Text file path inside the current project folder.")
     start_line: int = Field(default=1, ge=1, description="1-based line number to start reading from.")
     max_lines: int | None = Field(
         default=None,
@@ -21,50 +21,47 @@ class ReadFileInput(BaseModel):
 
 class SearchTextInput(BaseModel):
     query: str = Field(description="Literal text to search for.")
-    path: str = Field(default=".", description="Workspace path to search within.")
+    path: str = Field(default=".", description="Current-project path to search within.")
     max_results: int = Field(default=100, ge=1, le=500, description="Maximum matching lines to return.")
 
 
 class FindFilesInput(BaseModel):
     pattern: str = Field(description="Glob-style file pattern, for example '*.py' or 'src/**/*.js'.")
-    path: str = Field(default=".", description="Workspace path to search within.")
+    path: str = Field(default=".", description="Current-project path to search within.")
     max_results: int = Field(default=200, ge=1, le=1000, description="Maximum file paths to return.")
 
 
 class PatchFileInput(BaseModel):
-    path: str = Field(description="File path inside the workspace to edit.")
+    path: str = Field(description="File path inside the current project folder to edit.")
     old: str = Field(description="Exact text block to replace. It must appear exactly once.")
     new: str = Field(description="Replacement text block.")
 
 
 class CreateFileInput(BaseModel):
-    path: str = Field(description="New file path inside the workspace.")
+    path: str = Field(description="New file path inside the current project folder.")
     content: str = Field(description="Complete text content for the new file.")
 
 
 class WriteFileInput(BaseModel):
-    path: str = Field(description="File path inside the workspace to overwrite.")
+    path: str = Field(description="File path inside the current project folder to overwrite.")
     content: str = Field(description="Complete replacement text content.")
 
 
 class DeleteFileInput(BaseModel):
-    path: str = Field(description="File path inside the workspace to delete.")
-
-
-class RunShellInput(BaseModel):
-    command: str = Field(
-        description=(
-            "Shell command to run inside the workspace sandbox. Use only for tests, builds, "
-            "package installs/scaffolding, or short temporary scripts; do not use for file "
-            "listing, reading, searching, diffing, editing, or deleting."
-        )
-    )
-    timeout_seconds: int = Field(default=180, ge=1, le=180, description="Command timeout in seconds.")
+    path: str = Field(description="File path inside the current project folder to delete.")
 
 
 class GitDiffInput(BaseModel):
-    path: str = Field(default=".", description="Workspace path to show git diff for.")
+    path: str = Field(default=".", description="Current-project path to show git diff for.")
 
 
 class GitStatusInput(BaseModel):
     pass
+
+
+class SkillsListInput(BaseModel):
+    pass
+
+
+class SkillViewInput(BaseModel):
+    name: str = Field(description="Skill name to read, for example 'python-testing'.")

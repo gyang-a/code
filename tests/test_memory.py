@@ -11,16 +11,27 @@ from code_agent.services.workspace import Workspace
 class MemoryTests(unittest.TestCase):
     def test_loads_project_memory_as_context(self) -> None:
         with TemporaryWorkspace() as tmp_path:
-            (tmp_path / "CLAUDE.md").write_text("项目约定：先读文件再编辑。", encoding="utf-8")
+            (tmp_path / "AGENTS.md").write_text(
+                "Project rule: read files before editing.",
+                encoding="utf-8",
+            )
             workspace = Workspace(tmp_path)
 
             entries = load_project_memory(workspace)
             rendered = format_project_memory(entries)
 
             self.assertEqual(len(entries), 1)
-            self.assertIn("CLAUDE.md", rendered)
-            self.assertIn("先读文件再编辑", rendered)
+            self.assertIn("AGENTS.md", rendered)
+            self.assertIn("read files before editing", rendered)
 
+    def test_does_not_load_claude_memory_file(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            (tmp_path / "CLAUDE.md").write_text("legacy claude memory", encoding="utf-8")
+            workspace = Workspace(tmp_path)
+
+            entries = load_project_memory(workspace)
+
+            self.assertEqual(entries, [])
 
     def test_turn_metadata_is_bounded_and_not_a_full_tree(self) -> None:
         with TemporaryWorkspace() as tmp_path:
@@ -30,13 +41,14 @@ class MemoryTests(unittest.TestCase):
 
             metadata = build_turn_metadata(workspace, max_entries=1)
 
-            self.assertIn("workspace_name:", metadata)
+            self.assertIn("current_folder_name:", metadata)
             self.assertIn("top_level_visible_entries:", metadata)
-            self.assertIn("run_shell starts in the local workspace root", metadata)
-            self.assertIn("relative paths from the project root", metadata)
+            self.assertIn("Command execution is not available to the agent", metadata)
+            self.assertIn("exact command the user can run locally", metadata)
             self.assertIn("Broad triage budget", metadata)
             self.assertIn("at most 6 file reads or 12 total tool calls", metadata)
             self.assertIn("... truncated ...", metadata)
+            self.assertNotIn("/workspace", metadata)
             self.assertNotIn(str(tmp_path), metadata)
 
 

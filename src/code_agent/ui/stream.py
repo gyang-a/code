@@ -72,21 +72,13 @@ def _render_node_update(update: Mapping[str, Any]) -> None:
     if update.get("messages"):
         _render_messages(update["messages"])
 
-    if update.get("test_command"):
-        summary = format_tool_call_summary("run_shell", {"command": update["test_command"]}, max_length=100)
-        console.print(f"[dim]  validation command: {escape(summary)}[/dim]")
-
-    if update.get("test_result"):
-        first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "validation complete"
-        console.print(f"[dim]  {escape(first_line)}[/dim]")
-
 
 def _should_render_update(node_name: str, update: Any) -> bool:
     if not isinstance(update, Mapping):
         return True
     if not update:
         return False
-    renderable_keys = {"messages", "final_answer", "test_command", "test_result"}
+    renderable_keys = {"messages", "final_answer"}
     if any(update.get(key) for key in renderable_keys):
         return True
     if ".before_" in node_name or ".after_" in node_name:
@@ -106,10 +98,20 @@ def _render_messages(messages: list[BaseMessage]) -> None:
             if message.content and not tool_calls:
                 console.print("[dim]  Agent drafted a response[/dim]")
         elif isinstance(message, ToolMessage):
-            first_line = str(message.content).splitlines()[0] if str(message.content).strip() else "empty tool result"
+            content = str(message.content)
+            first_line = content.splitlines()[0] if content.strip() else "empty tool result"
             style = "red" if first_line.startswith("REJECTED[") else "dim"
-            console.print(f"[{style}]  tool result:[/{style}] {escape(_tool_result_summary(first_line))}")
+            console.print(f"[{style}]  tool result:[/{style}] {escape(_tool_result_summary(content))}")
 
 
-def _tool_result_summary(first_line: str) -> str:
-    return truncate(first_line, 180)
+def _tool_result_summary(content: str) -> str:
+    if not content.strip():
+        return "empty tool result"
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    summary = " / ".join(lines[:4])
+
+    if len(lines) > 4:
+        summary += " / ..."
+
+    return truncate(summary, 260)

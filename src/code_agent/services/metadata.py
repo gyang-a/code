@@ -11,7 +11,6 @@ from code_agent.services.workspace import Workspace, WorkspaceError
 PROJECT_MARKERS = (
     "README.md",
     "AGENTS.md",
-    "CLAUDE.md",
     "pyproject.toml",
     "requirements.txt",
     "uv.lock",
@@ -39,8 +38,7 @@ def build_turn_metadata(workspace: Workspace, *, max_entries: int = 25) -> str:
     """
     lines = [
         "Runtime metadata:",
-        f"- workspace_name: {workspace.root.name}",
-        "- workspace_root: available to tools as the current workspace",
+        f"- current_folder_name: {workspace.root.name}",
         f"- project_type: {_detect_project_type(workspace)}",
         f"- git_branch: {_git_one_line(workspace, ['branch', '--show-current']) or 'unknown'}",
         f"- git_status: {_git_status_summary(workspace)}",
@@ -54,11 +52,10 @@ def build_turn_metadata(workspace: Workspace, *, max_entries: int = 25) -> str:
         "- For broad triage, inspect project markers, entry points, config, and representative core files first.",
         "- Use patch_file for normal edits; avoid full-file rewrites.",
         "- Use create_file only for genuinely new files.",
-        "- Use git_status/git_diff to inspect changes; do not use shell for git diff/status.",
-        "- Use run_shell only for validation commands such as tests, builds, lint, or type checks.",
-        "- Do not run long-lived dev servers with run_shell; use build/test/lint for validation.",
-        "- run_shell starts in the local workspace root; use relative paths from the project root.",
-        "- Do not use shell for listing, reading, searching, editing, deleting, or diffing files.",
+        "- Use git_status/git_diff to inspect changes.",
+        "- Command execution is not available to the agent.",
+        "- Do not claim to run tests, builds, package installs, scaffolding, or dev servers.",
+        "- If validation would be useful, include the exact command the user can run locally in the final answer.",
         "",
         "Command policy:",
         *_format_command_policy(workspace),
@@ -122,8 +119,8 @@ def _format_command_policy(workspace: Workspace) -> list[str]:
 
     if policy is None:
         return [
-            "- allowed: project-specific validation commands only",
-            "- requires_approval: installs, scaffolding, dev servers, dependency changes, unknown commands",
+            "- command execution: unavailable to the agent",
+            "- validation: suggest exact commands for the user to run locally",
         ]
 
     lines: list[str] = []

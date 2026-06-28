@@ -36,8 +36,6 @@ def _decision_rejected(workspace: Workspace, tool_name: str, payload: dict) -> s
     if decision.risk.value == "level_3":
         return rejected(decision.risk, decision.reason)
 
-  
-
     return None
 
 
@@ -47,7 +45,7 @@ def _run_git(
     *,
     timeout: int = 10,
     output_limit: int = DEFAULT_DIFF_OUTPUT_LIMIT,
-) -> str:
+) -> str | None:
     result = subprocess.run(
         ["git", *args],
         cwd=workspace.root,
@@ -61,6 +59,8 @@ def _run_git(
 
     output = (result.stdout + result.stderr).strip()
     if result.returncode not in (0, 1):
+        if "not a git repository" in output.lower():
+            return None
         return f"ERROR: git {' '.join(args)} failed.\n{truncate(output, output_limit)}"
 
     return truncate(output, output_limit)
@@ -72,11 +72,15 @@ def _git_diff_for(workspace: Workspace, path: str) -> str:
         rel = workspace.relative(resolved)
 
         diff = _run_git(workspace, ["diff", "--", rel])
+        if diff is None:
+            return ""
         if diff and not diff.startswith("ERROR:"):
             return "\n\nDiff:\n" + diff
 
-        # git diff 不显示 untracked 文件，所以这里补一个 status 提示。
+        # git diff does not show untracked files, so include concise status.
         status = _run_git(workspace, ["status", "--short", "--", rel], output_limit=2_000)
+        if status is None:
+            return ""
         if status:
             return "\n\nGit status:\n" + status
 
@@ -286,11 +290,14 @@ def build_git_diff_tool(workspace: Workspace):
             resolved = workspace.resolve(path)
             rel = workspace.relative(resolved)
             output = _run_git(workspace, ["diff", "--", rel])
-
+            if output is None:
+                return "NOT_GIT_REPOSITORY"
             if output:
                 return output
 
             status = _run_git(workspace, ["status", "--short", "--", rel], output_limit=2_000)
+            if status is None:
+                return "NOT_GIT_REPOSITORY"
             if status:
                 return f"NO_TRACKED_DIFF\n\nGit status:\n{status}"
 
@@ -310,6 +317,8 @@ def build_git_status_tool(workspace: Workspace):
         """Show concise git status for the workspace."""
         try:
             output = _run_git(workspace, ["status", "--short"], output_limit=6_000)
+            if output is None:
+                return "NOT_GIT_REPOSITORY"
             return output or "CLEAN"
         except subprocess.TimeoutExpired as exc:
             return _error(exc)

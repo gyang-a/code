@@ -40,10 +40,10 @@ class EnvTests(unittest.TestCase):
             env_path = tmp_path / ".env"
             env_path.write_text("DEEPSEEK_API_KEY=file-key\n", encoding="utf-8")
 
-            with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "shell-key"}, clear=True):
+            with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "env-key"}, clear=True):
                 load_dotenv(env_path)
 
-                self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "shell-key")
+                self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "env-key")
 
 
 class TemporaryWorkspace:

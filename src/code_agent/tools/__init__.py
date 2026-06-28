@@ -11,7 +11,7 @@ from code_agent.tools.fs import (
     build_write_file_tool,
 )
 from code_agent.tools.search import build_find_files_tool, build_search_text_tool
-from code_agent.tools.shell import build_run_command_tool
+from code_agent.tools.skills import build_skill_view_tool, build_skills_list_tool
 
 __all__ = [
     "build_create_file_tool",
@@ -22,7 +22,8 @@ __all__ = [
     "build_list_files_tool",
     "build_patch_file_tool",
     "build_read_file_tool",
-    "build_run_command_tool",
     "build_search_text_tool",
+    "build_skill_view_tool",
+    "build_skills_list_tool",
     "build_write_file_tool",
 ]

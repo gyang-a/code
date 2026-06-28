@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage
-
 
 @dataclass
 class TokenUsage:
@@ -20,7 +18,7 @@ class TokenUsage:
         self.actual = self.actual or other.actual
 
 
-def estimate_message_tokens(messages: list[BaseMessage]) -> int:
+def estimate_message_tokens(messages: list[Any]) -> int:
     chars = 0
     for message in messages:
         chars += len(message.type) + len(_stringify_content(getattr(message, "content", "")))
@@ -29,16 +27,16 @@ def estimate_message_tokens(messages: list[BaseMessage]) -> int:
     return max(1, chars // 4) if chars else 0
 
 
-def usage_from_messages(messages: list[BaseMessage]) -> TokenUsage:
+def usage_from_messages(messages: list[Any]) -> TokenUsage:
     usage = TokenUsage()
     for message in messages:
-        if not isinstance(message, AIMessage):
+        if getattr(message, "type", None) != "ai":
             continue
         usage.add(usage_from_message(message))
     return usage
 
 
-def usage_from_message(message: BaseMessage) -> TokenUsage:
+def usage_from_message(message: Any) -> TokenUsage:
     actual = _usage_mapping(getattr(message, "usage_metadata", None))
     if actual:
         return actual
@@ -100,7 +98,7 @@ def _int_value(value: dict[str, Any], *keys: str) -> int:
     return 0
 
 
-def _estimate_single_message_tokens(message: BaseMessage) -> int:
+def _estimate_single_message_tokens(message: Any) -> int:
     chars = len(message.type) + len(_stringify_content(getattr(message, "content", "")))
     tool_calls = getattr(message, "tool_calls", None) or []
     chars += len(str(tool_calls))

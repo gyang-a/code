@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 
 from code_agent.services.workspace import Workspace, WorkspaceError
-from code_agent.tools.fs import build_read_file_tool
+from code_agent.tools.fs import build_create_file_tool, build_git_status_tool, build_read_file_tool
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -12,8 +12,20 @@ class WorkspaceTests(unittest.TestCase):
         with TemporaryWorkspace() as tmp_path:
             workspace = Workspace(tmp_path)
 
-            with self.assertRaises(WorkspaceError):
+            with self.assertRaises(WorkspaceError) as raised:
                 workspace.resolve("../outside.txt")
+
+            self.assertIn("Path escapes current project folder", str(raised.exception))
+            self.assertIn(str(tmp_path.resolve()), str(raised.exception))
+
+    def test_resolve_accepts_absolute_path_inside_workspace(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+            nested = tmp_path / "src" / "app.py"
+
+            resolved = workspace.resolve(nested)
+
+            self.assertEqual(resolved, nested.resolve())
 
     def test_read_file_rejects_sensitive_file(self) -> None:
         with TemporaryWorkspace() as tmp_path:
@@ -64,6 +76,25 @@ class WorkspaceTests(unittest.TestCase):
 
             self.assertIn("FILE: data.txt", content)
             self.assertIn("truncated", content)
+
+    def test_create_file_tool_does_not_append_git_fatal_outside_git_repo(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+            create_file = build_create_file_tool(workspace)
+
+            content = create_file.invoke({"path": "src/app.py", "content": "print('ok')\n"})
+
+            self.assertEqual(content, "Created src/app.py")
+            self.assertTrue((tmp_path / "src" / "app.py").exists())
+
+    def test_git_status_reports_non_git_repository_cleanly(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+            git_status = build_git_status_tool(workspace)
+
+            content = git_status.invoke({})
+
+            self.assertEqual(content, "NOT_GIT_REPOSITORY")
 
     def test_list_files_reports_empty_directory_clearly(self) -> None:
         from code_agent.tools.fs import build_list_files_tool

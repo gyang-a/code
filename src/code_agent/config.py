@@ -24,6 +24,8 @@ DEFAULT_EXCLUDE_GLOBS = (
     ".next/**",
     ".pytest_cache/**",
     "__pycache__/**",
+    ".code-agent/checkpoints.sqlite3",
+    ".code-agent/checkpoints.sqlite3-*",
 )
 
 SENSITIVE_FILE_NAMES = {

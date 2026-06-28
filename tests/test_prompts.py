@@ -12,6 +12,13 @@ class PromptTests(unittest.TestCase):
         self.assertIn("at most 6 file reads or 12 total tool calls", SYSTEM_PROMPT)
         self.assertIn("prioritized findings", SYSTEM_PROMPT)
 
+    def test_prompt_does_not_suggest_absolute_workspace_path(self) -> None:
+        self.assertNotIn("/workspace", SYSTEM_PROMPT)
+        self.assertIn("current project folder", SYSTEM_PROMPT)
+        self.assertIn("Command execution is not available", SYSTEM_PROMPT)
+        self.assertIn("Do not claim to run tests", SYSTEM_PROMPT)
+        self.assertIn("exact command the user can run locally", SYSTEM_PROMPT)
+
 
 if __name__ == "__main__":
     unittest.main()

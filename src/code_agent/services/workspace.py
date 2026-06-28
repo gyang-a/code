@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from pathlib import Path
 
 from code_agent.config import (
@@ -13,7 +14,7 @@ from code_agent.config import (
 
 
 class WorkspaceError(ValueError):
-    """工作区操作违反沙箱策略时抛出。"""
+    """Raised when a workspace operation violates project boundaries or policy."""
 
 
 class Workspace:
@@ -31,9 +32,9 @@ class Workspace:
         self.exclude_globs = exclude_globs
 
         if not self.root.exists():
-            raise WorkspaceError(f"工作区不存在: {self.root}")
+            raise WorkspaceError(f"Project folder does not exist: {self.root}")
         if not self.root.is_dir():
-            raise WorkspaceError(f"工作区不是目录: {self.root}")
+            raise WorkspaceError(f"Project folder is not a directory: {self.root}")
 
     def resolve(self, relative_path: str | Path) -> Path:
         candidate = Path(relative_path)
@@ -43,10 +44,11 @@ class Workspace:
         else:
             path = (self.root / candidate).resolve()
 
-        try:
-            path.relative_to(self.root)
-        except ValueError as exc:
-            raise WorkspaceError(f"路径逃逸工作区: {relative_path}") from exc
+        if not _is_relative_to(path, self.root):
+            raise WorkspaceError(
+                f"Path escapes current project folder: {relative_path}. "
+                f"Current project folder: {self.root}"
+            )
 
         return path
 
@@ -56,7 +58,10 @@ class Workspace:
         try:
             return resolved.relative_to(self.root).as_posix()
         except ValueError as exc:
-            raise WorkspaceError(f"路径逃逸工作区: {path}") from exc
+            raise WorkspaceError(
+                f"Path escapes current project folder: {path}. "
+                f"Current project folder: {self.root}"
+            ) from exc
 
     def is_excluded(self, path: str | Path) -> bool:
         resolved = self.resolve(path)
@@ -82,10 +87,10 @@ class Workspace:
         resolved = self.resolve(path)
 
         if self.is_excluded(resolved):
-            raise WorkspaceError(f"拒绝访问 excluded path: {self.relative(resolved)}")
+            raise WorkspaceError(f"Refusing to access excluded path: {self.relative(resolved)}")
 
         if self.is_sensitive(resolved):
-            raise WorkspaceError(f"拒绝访问敏感路径: {self.relative(resolved)}")
+            raise WorkspaceError(f"Refusing to access sensitive path: {self.relative(resolved)}")
 
         return resolved
 
@@ -93,10 +98,10 @@ class Workspace:
         resolved = self.assert_visible_path(path)
 
         if not resolved.exists():
-            raise WorkspaceError(f"目录不存在: {path}")
+            raise WorkspaceError(f"Directory does not exist: {path}")
 
         if not resolved.is_dir():
-            raise WorkspaceError(f"不是目录: {path}")
+            raise WorkspaceError(f"Not a directory: {path}")
 
         return resolved
 
@@ -109,15 +114,15 @@ class Workspace:
         resolved = self.assert_visible_path(path)
 
         if not resolved.exists():
-            raise WorkspaceError(f"文件不存在: {path}")
+            raise WorkspaceError(f"File does not exist: {path}")
 
         if not resolved.is_file():
-            raise WorkspaceError(f"不是文件: {path}")
+            raise WorkspaceError(f"Not a file: {path}")
 
         if enforce_size_limit and resolved.stat().st_size > self.read_limit:
             raise WorkspaceError(
-                f"文件过大（{resolved.stat().st_size} bytes）。"
-                f"请先搜索或读取更小范围: {self.relative(resolved)}"
+                f"File is too large ({resolved.stat().st_size} bytes). "
+                f"Search it or read a smaller window first: {self.relative(resolved)}"
             )
 
         return resolved
@@ -137,7 +142,7 @@ class Workspace:
             sample = handle.read(4096)
 
         if b"\x00" in sample:
-            raise WorkspaceError(f"拒绝读取二进制文件: {self.relative(resolved)}")
+            raise WorkspaceError(f"Refusing to read binary file: {self.relative(resolved)}")
 
         return resolved
 
@@ -199,13 +204,13 @@ class Workspace:
         resolved = self.resolve(path)
 
         if self.is_excluded(resolved):
-            raise WorkspaceError(f"拒绝写入 excluded path: {self.relative(resolved)}")
+            raise WorkspaceError(f"Refusing to write excluded path: {self.relative(resolved)}")
 
         if self.is_sensitive(resolved):
-            raise WorkspaceError(f"拒绝写入敏感文件: {self.relative(resolved)}")
+            raise WorkspaceError(f"Refusing to write sensitive file: {self.relative(resolved)}")
 
         if resolved.exists() and not overwrite:
-            raise WorkspaceError(f"文件已存在: {self.relative(resolved)}")
+            raise WorkspaceError(f"File already exists: {self.relative(resolved)}")
 
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content, encoding="utf-8", newline="")
@@ -235,3 +240,12 @@ def _matches_exclude_glob(rel: str, pattern: str) -> bool:
         )
 
     return False
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        normalized_path = os.path.normcase(str(path.resolve()))
+        normalized_root = os.path.normcase(str(root.resolve()))
+        return os.path.commonpath([normalized_path, normalized_root]) == normalized_root
+    except ValueError:
+        return False
