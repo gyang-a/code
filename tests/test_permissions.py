@@ -59,6 +59,61 @@ class PermissionTests(unittest.TestCase):
             self.assertTrue(decision.allowed)
             self.assertEqual(argv, ["npm", "test"])
 
+    def test_chained_npm_build_with_stderr_merge_is_allowed(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, argv = classify_command("cd task-board && npm run build 2>&1", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_1)
+            self.assertTrue(decision.allowed)
+            self.assertIsNotNone(argv)
+
+    def test_python_validation_and_server_commands_are_distinguished(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            test_decision, _ = classify_command("python -m pytest 2>&1", workspace)
+            server_decision, _ = classify_command("python -m http.server 8000", workspace)
+
+            self.assertEqual(test_decision.risk, RiskLevel.level_1)
+            self.assertTrue(test_decision.allowed)
+            self.assertEqual(server_decision.risk, RiskLevel.level_3)
+            self.assertFalse(server_decision.allowed)
+            self.assertIn("run_shell waits", server_decision.reason)
+
+    def test_npx_commands_require_approval_not_file_inspection_rejection(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            build_decision, _ = classify_command("cd task-board && npx vite build 2>&1", workspace)
+            version_decision, _ = classify_command("cd task-board && npx vite --version 2>&1", workspace)
+
+            self.assertEqual(build_decision.risk, RiskLevel.level_2)
+            self.assertTrue(build_decision.requires_approval)
+            self.assertEqual(version_decision.risk, RiskLevel.level_2)
+            self.assertTrue(version_decision.requires_approval)
+
+    def test_npx_no_install_validation_is_allowed(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, _ = classify_command("cd task-board && npx --no-install vite build 2>&1", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_1)
+            self.assertTrue(decision.allowed)
+
+    def test_vite_dev_server_is_rejected_not_run_foreground(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision, argv = classify_command("cd task-board && npx vite --host 2>&1", workspace)
+
+            self.assertEqual(decision.risk, RiskLevel.level_3)
+            self.assertFalse(decision.allowed)
+            self.assertIn("dev server", decision.reason)
+            self.assertIsNotNone(argv)
+
     def test_unknown_shell_command_requires_approval_but_preserves_argv(self) -> None:
         with TemporaryWorkspace() as tmp_path:
             workspace = Workspace(tmp_path)

@@ -9,15 +9,23 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from collections.abc import Mapping
 
 import typer
+from langchain_core.messages import BaseMessage
 from langgraph.types import Command
 from rich.prompt import Prompt
 
 from code_agent.config import AgentConfig, DEFAULT_MODEL
 from code_agent.services.env import load_dotenv
-from code_agent.services.sandbox import SandboxPolicy, describe_sandbox_policy
+from code_agent.services.sandbox import describe_sandbox_policy
 from code_agent.services.summarizer import truncate
+from code_agent.services.usage import (
+    TokenUsage,
+    estimate_message_tokens,
+    format_usage_line,
+    usage_from_messages,
+)
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.safety import describe_permission_policy
 from code_agent.ui.approval import format_approval_summary
@@ -35,11 +43,17 @@ class Session:
     thread_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     interactions: int = 0
     tool_loops: int = 0
+    context_compressions: int = 0
+    last_context_tokens: int = 0
+    model_usage: TokenUsage = field(default_factory=TokenUsage)
 
     def reset(self) -> None:
         self.thread_id = str(uuid.uuid4())
         self.interactions = 0
         self.tool_loops = 0
+        self.context_compressions = 0
+        self.last_context_tokens = 0
+        self.model_usage = TokenUsage()
 
 
 def _initial_state(session: Session, user_input: str) -> dict:
@@ -130,13 +144,12 @@ def _print_raw(text: str) -> None:
 
 def _doctor(workspace: str) -> None:
     env_path = Path(workspace) / ".env"
-    sandbox_policy = _sandbox_policy_from_env()
     table_rows = [
         ("workspace", "ok" if Path(workspace).is_dir() else "missing"),
         (".env", "found" if env_path.exists() else "missing"),
         ("DEEPSEEK_API_KEY", "set" if os.getenv("DEEPSEEK_API_KEY") else "missing"),
         ("CODE_AGENT_MODEL", os.getenv("CODE_AGENT_MODEL") or "unset"),
-        ("shell_sandbox", describe_sandbox_policy(sandbox_policy)),
+        ("shell_sandbox", describe_sandbox_policy()),
         ("git", "found" if shutil.which("git") else "missing"),
         ("rg", "found" if shutil.which("rg") else "missing"),
         ("langgraph", "found" if importlib.util.find_spec("langgraph") else "missing"),
@@ -194,6 +207,7 @@ def _handle_slash(command: str, session: Session) -> bool:
     elif name == "/usage":
         console.print(f"interactions: {session.interactions}")
         console.print(f"thread_id: {session.thread_id}")
+        _print_usage(session)
     elif name == "/mcp":
         console.print("MCP integration is not configured in this MVP.")
     else:
@@ -204,15 +218,6 @@ def _handle_slash(command: str, session: Session) -> bool:
 
 def _is_slash_command(user_input: str) -> bool:
     return user_input.lstrip().startswith("/")
-
-
-def _sandbox_policy_from_env() -> SandboxPolicy:
-    config = AgentConfig()
-    return SandboxPolicy(
-        backend=config.shell_sandbox_backend,
-        docker_image=config.docker_image,
-        allow_network=config.docker_allow_network,
-    )
 
 
 def _prompt_approval_decisions(interrupt_value: Any) -> list[dict[str, Any]]:
@@ -265,7 +270,7 @@ def chat(
         env_file=str(env_path) if loaded_env else None,
     )
     print_banner(session.workspace, session.model)
-    console.print(f"[dim]shell sandbox: {describe_sandbox_policy(_sandbox_policy_from_env())}[/dim]")
+    console.print(f"[dim]shell sandbox: {describe_sandbox_policy()}[/dim]")
     if loaded_env:
         console.print(f"[dim]Loaded environment variables from {env_path}[/dim]")
 
@@ -299,7 +304,7 @@ def chat(
         console.print("[dim]Agent started[/dim]")
 
         try:
-            final_answer = _run_graph_stream(graph, _initial_state(session, user_input), config)
+            final_answer = _run_graph_stream(graph, _initial_state(session, user_input), config, session)
             while final_answer is None:
                 state = graph.get_state(config)
                 interrupts = state.interrupts
@@ -313,21 +318,25 @@ def chat(
                         "[dim]Executing approved action(s). "
                         "Long-running shell output is captured and shown when the tool finishes.[/dim]"
                     )
-                final_answer = _run_graph_stream(graph, Command(resume={"decisions": decisions}), config)
+                final_answer = _run_graph_stream(graph, Command(resume={"decisions": decisions}), config, session)
         except Exception as exc:
             console.print(f"[red]Agent error:[/red] {exc}")
             continue
 
         state = graph.get_state(config)
         session.tool_loops += state.values.get("run_model_call_count", 0)
+        session.last_context_tokens = estimate_message_tokens(state.values.get("messages", []))
         answer = final_answer or state.values.get("final_answer") or state.values["messages"][-1].content
         console.print("\n[bold green]Agent[/bold green]")
         _print_raw(str(answer))
+        _print_usage(session)
 
 
-def _run_graph_stream(graph, graph_input, config: dict) -> str | None:
+def _run_graph_stream(graph, graph_input, config: dict, session: Session | None = None) -> str | None:
     final_answer = None
     for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
+        if session is not None:
+            _update_usage_from_chunk(session, chunk)
         render_stream_chunk(chunk)
         interrupt_value = interrupt_from_chunk(chunk)
         if interrupt_value is not None:
@@ -336,6 +345,30 @@ def _run_graph_stream(graph, graph_input, config: dict) -> str | None:
         if chunk_answer:
             final_answer = chunk_answer
     return final_answer
+
+
+def _update_usage_from_chunk(session: Session, chunk: Mapping[str, Any]) -> None:
+    for node_name, update in chunk.items():
+        if isinstance(update, Mapping):
+            messages = update.get("messages")
+            if node_name in {"agent", "model"} and isinstance(messages, list):
+                session.model_usage.add(
+                    usage_from_messages(
+                        [message for message in messages if isinstance(message, BaseMessage)]
+                    )
+                )
+            if "SummarizationMiddleware" in node_name and _has_meaningful_update(update):
+                session.context_compressions += 1
+
+
+def _has_meaningful_update(update: Mapping[str, Any]) -> bool:
+    return any(bool(value) for value in update.values())
+
+
+def _print_usage(session: Session) -> None:
+    console.print(
+        f"[dim]{format_usage_line(context_tokens=session.last_context_tokens, model_usage=session.model_usage, compression_count=session.context_compressions)}[/dim]"
+    )
 
 
 if __name__ == "__main__":

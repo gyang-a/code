@@ -26,6 +26,8 @@ def render_stream_chunk(chunk: Mapping[str, Any]) -> None:
         return
 
     for node_name, update in chunk.items():
+        if not _should_render_update(node_name, update):
+            continue
         label = NODE_LABELS.get(node_name, node_name)
         console.print(f"[dim]> {label}[/dim]")
         if isinstance(update, Mapping):
@@ -77,6 +79,20 @@ def _render_node_update(update: Mapping[str, Any]) -> None:
     if update.get("test_result"):
         first_line = str(update["test_result"]).splitlines()[0] if str(update["test_result"]).strip() else "validation complete"
         console.print(f"[dim]  {escape(first_line)}[/dim]")
+
+
+def _should_render_update(node_name: str, update: Any) -> bool:
+    if not isinstance(update, Mapping):
+        return True
+    if not update:
+        return False
+    renderable_keys = {"messages", "final_answer", "test_command", "test_result"}
+    if any(update.get(key) for key in renderable_keys):
+        return True
+    if ".before_" in node_name or ".after_" in node_name:
+        return False
+    return False
+
 
 def _render_messages(messages: list[BaseMessage]) -> None:
     for message in messages:

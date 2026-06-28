@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class ListFilesInput(BaseModel):
     path: str = Field(default=".", description="Directory path inside the workspace to list.")
+    max_entries: int = Field(default=200, ge=1, le=1000, description="Maximum visible entries to return.")
 
 
 class ReadFileInput(BaseModel):
@@ -19,7 +20,7 @@ class ReadFileInput(BaseModel):
 
 
 class SearchTextInput(BaseModel):
-    query: str = Field(description="Literal text or ripgrep-compatible pattern to search for.")
+    query: str = Field(description="Literal text to search for.")
     path: str = Field(default=".", description="Workspace path to search within.")
     max_results: int = Field(default=100, ge=1, le=500, description="Maximum matching lines to return.")
 
@@ -28,11 +29,6 @@ class FindFilesInput(BaseModel):
     pattern: str = Field(description="Glob-style file pattern, for example '*.py' or 'src/**/*.js'.")
     path: str = Field(default=".", description="Workspace path to search within.")
     max_results: int = Field(default=200, ge=1, le=1000, description="Maximum file paths to return.")
-
-
-class FileTreeInput(BaseModel):
-    path: str = Field(default=".", description="Workspace directory path to render as a tree.")
-    max_entries: int = Field(default=200, ge=1, le=1000, description="Maximum tree entries to return.")
 
 
 class PatchFileInput(BaseModel):
@@ -68,3 +64,7 @@ class RunShellInput(BaseModel):
 
 class GitDiffInput(BaseModel):
     path: str = Field(default=".", description="Workspace path to show git diff for.")
+
+
+class GitStatusInput(BaseModel):
+    pass

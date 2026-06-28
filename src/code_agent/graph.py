@@ -20,7 +20,7 @@ from code_agent.config import AgentConfig
 from code_agent.prompts import SYSTEM_PROMPT
 from code_agent.services.metadata import build_turn_metadata
 from code_agent.services.permissions import classify_tool_call
-from code_agent.services.sandbox import SandboxPolicy, describe_sandbox_policy
+from code_agent.services.sandbox import describe_sandbox_policy
 from code_agent.services.workspace import Workspace
 from code_agent.state import AgentState
 from code_agent.tools import (
@@ -43,7 +43,7 @@ def build_tools(
     *,
     read_max_lines: int | None = None,
     tool_output_limit: int | None = None,
-    sandbox_policy: SandboxPolicy | None = None,
+    allow_requires_approval_tools: bool = False,
 ):
     return [
         build_list_files_tool(workspace),
@@ -58,7 +58,10 @@ def build_tools(
         build_create_file_tool(workspace),
         build_write_file_tool(workspace),
         build_delete_file_tool(workspace),
-        build_run_command_tool(workspace, sandbox_policy=sandbox_policy),
+        build_run_command_tool(
+            workspace,
+            allow_requires_approval=allow_requires_approval_tools,
+        ),
         build_git_status_tool(workspace),
         build_git_diff_tool(workspace),
     ]
@@ -72,16 +75,11 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         read_max_lines=agent_config.file_read_max_lines,
         exclude_globs=agent_config.exclude_globs,
     )
-    sandbox_policy = SandboxPolicy(
-        backend=agent_config.shell_sandbox_backend,
-        docker_image=agent_config.docker_image,
-        allow_network=agent_config.docker_allow_network,
-    )
     tools = build_tools(
         workspace,
         read_max_lines=agent_config.file_read_max_lines,
         tool_output_limit=agent_config.tool_output_limit,
-        sandbox_policy=sandbox_policy,
+        allow_requires_approval_tools=True,
     )
     llm_kwargs = {"temperature": 0}
     if agent_config.api_key:
@@ -95,7 +93,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None):
         middleware=[
             RuntimeMetadataMiddleware(
                 workspace=workspace,
-                shell_sandbox=describe_sandbox_policy(sandbox_policy),
+                shell_sandbox=describe_sandbox_policy(),
                 max_tool_calls_per_turn=agent_config.max_tool_calls_per_turn,
             ),
             HumanInTheLoopMiddleware(

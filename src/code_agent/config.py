@@ -13,8 +13,6 @@ DEFAULT_MAX_TOOL_CALLS_PER_TURN = 3
 DEFAULT_CONTEXT_MESSAGE_LIMIT = 30
 DEFAULT_CONTEXT_TOKEN_LIMIT = 84_000
 DEFAULT_CONTEXT_KEEP_RECENT = 18
-DEFAULT_SHELL_SANDBOX_BACKEND = "local"
-DEFAULT_DOCKER_IMAGE = "python:3.12-slim"
 
 DEFAULT_EXCLUDE_GLOBS = (
     ".git/**",
@@ -61,7 +59,4 @@ class AgentConfig:
     context_message_limit: int = DEFAULT_CONTEXT_MESSAGE_LIMIT
     context_token_limit: int = DEFAULT_CONTEXT_TOKEN_LIMIT
     context_keep_recent: int = DEFAULT_CONTEXT_KEEP_RECENT
-    shell_sandbox_backend: str = field(default_factory=lambda: os.getenv("CODE_AGENT_SHELL_SANDBOX", DEFAULT_SHELL_SANDBOX_BACKEND).lower())
-    docker_image: str = field(default_factory=lambda: os.getenv("CODE_AGENT_DOCKER_IMAGE", DEFAULT_DOCKER_IMAGE))
-    docker_allow_network: bool = field(default_factory=lambda: os.getenv("CODE_AGENT_DOCKER_NETWORK", "none").lower() not in {"", "0", "false", "none", "off"})
     exclude_globs: tuple[str, ...] = field(default_factory=lambda: DEFAULT_EXCLUDE_GLOBS)

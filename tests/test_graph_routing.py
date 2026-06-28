@@ -16,7 +16,7 @@ from code_agent.main import _is_slash_command, _parse_undo_args, _print_raw
 from code_agent.services.workspace import Workspace
 from code_agent.tools.shell import build_run_command_tool
 from code_agent.ui.approval import format_approval_summary, format_tool_call_summary
-from code_agent.ui.stream import _tool_result_summary
+from code_agent.ui.stream import _should_render_update, _tool_result_summary
 
 
 class GraphRoutingTests(unittest.TestCase):
@@ -79,22 +79,72 @@ class GraphRoutingTests(unittest.TestCase):
 
         self.assertEqual(summary, "hello from command")
 
+    def test_stream_hides_empty_middleware_lifecycle_updates(self) -> None:
+        self.assertFalse(_should_render_update("SummarizationMiddleware.before_model", {}))
+        self.assertFalse(_should_render_update("ModelCallLimitMiddleware.after_model", {}))
+        self.assertTrue(_should_render_update("model", {"messages": ["x"]}))
+
     def test_run_shell_tool_returns_command_output_without_permission_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_shell = build_run_command_tool(Workspace(tmp))
 
-            result = run_shell.invoke({"command": "echo hello"})
+            result = run_shell.invoke({"command": "python -m pytest --version"})
 
-        self.assertIn("hello", result)
+        self.assertIn("pytest", result)
         self.assertNotIn("ALLOWED[", result)
         self.assertNotIn("requires approval", result.lower())
 
+    def test_run_shell_tool_rejects_level_2_without_hitl_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_shell = build_run_command_tool(Workspace(tmp))
+
+            result = run_shell.invoke({"command": "npm create vite@latest app"})
+
+        self.assertIn("REJECTED[level_2]", result)
+
+    def test_run_shell_tool_allows_level_2_after_hitl_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "code_agent.tools.shell.build_shell_sandbox"
+        ) as sandbox_factory:
+            sandbox = sandbox_factory.return_value
+            sandbox.run_shell.return_value.returncode = 0
+            sandbox.run_shell.return_value.stdout = "created\n"
+            sandbox.run_shell.return_value.stderr = ""
+            run_shell = build_run_command_tool(
+                Workspace(tmp),
+                allow_requires_approval=True,
+            )
+
+            result = run_shell.invoke({"command": "npm create vite@latest app"})
+
+        self.assertEqual(result, "created")
+        sandbox.run_shell.assert_called_once()
+
+    def test_run_shell_tool_rejects_dev_server_even_after_hitl_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "code_agent.tools.shell.build_shell_sandbox"
+        ) as sandbox_factory:
+            sandbox = sandbox_factory.return_value
+            run_shell = build_run_command_tool(
+                Workspace(tmp),
+                allow_requires_approval=True,
+            )
+
+            result = run_shell.invoke({"command": "npm run dev"})
+
+        self.assertIn("REJECTED[level_3]", result)
+        self.assertIn("dev server", result)
+        sandbox.run_shell.assert_not_called()
+
     def test_agent_toolset_does_not_expose_file_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            tool_names = {tool.name for tool in build_tools(Workspace(tmp))}
+            tools = build_tools(Workspace(tmp))
+            tool_names = {tool.name for tool in tools}
 
+        self.assertNotIn(None, tools)
         self.assertIn("list_files", tool_names)
         self.assertIn("find_files", tool_names)
+        self.assertIn("git_diff", tool_names)
         self.assertNotIn("get_file_tree", tool_names)
 
     def test_tool_args_are_pydantic_schemas_with_descriptions(self) -> None:
@@ -163,4 +213,3 @@ class GraphRoutingTests(unittest.TestCase):
 class FakeToolCallRequest:
     def __init__(self, name: str, args: dict) -> None:
         self.tool_call = {"name": name, "args": args, "id": "call_1"}
-

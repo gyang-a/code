@@ -7,8 +7,8 @@ from code_agent.services.workspace import Workspace, WorkspaceError
 
 
 PROJECT_MEMORY_FILES = (
-    "CLAUDE.md",
     "AGENTS.md",
+    "CLAUDE.md",
     ".code-agent/memory.md",
 )
 

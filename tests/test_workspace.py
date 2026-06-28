@@ -65,6 +65,31 @@ class WorkspaceTests(unittest.TestCase):
             self.assertIn("FILE: data.txt", content)
             self.assertIn("truncated", content)
 
+    def test_list_files_reports_empty_directory_clearly(self) -> None:
+        from code_agent.tools.fs import build_list_files_tool
+
+        with TemporaryWorkspace() as tmp_path:
+            (tmp_path / "empty").mkdir()
+            workspace = Workspace(tmp_path)
+            list_files = build_list_files_tool(workspace)
+
+            content = list_files.invoke({"path": "empty"})
+
+            self.assertEqual(content, "EMPTY: empty has no visible entries.")
+
+    def test_list_files_reports_truncation(self) -> None:
+        from code_agent.tools.fs import build_list_files_tool
+
+        with TemporaryWorkspace() as tmp_path:
+            for index in range(3):
+                (tmp_path / f"file_{index}.txt").write_text("x", encoding="utf-8")
+            workspace = Workspace(tmp_path)
+            list_files = build_list_files_tool(workspace)
+
+            content = list_files.invoke({"path": ".", "max_entries": 2})
+
+            self.assertIn("... truncated after 2 visible entries ...", content)
+
 
 class TemporaryWorkspace:
     def __enter__(self) -> Path:

@@ -29,7 +29,7 @@ Slash commands such as `/help`, `/diff`, `/doctor`, `/tools`, and `/undo` are ha
 
 - Level 0: read-only tools, such as `list_files`, `read_file`, `search_text`, `git_status`, and `git_diff`.
 - Level 1: low-risk workspace edits or common test/build/read commands.
-- Level 2: user review required, such as package metadata edits, dependency installs, Docker Compose, deletes, unknown shell commands, or writes outside `src/` and `tests/`.
+- Level 2: user review required, such as package metadata edits, dependency installs, deletes, unknown shell commands, or writes outside `src/` and `tests/`.
 - Level 3: rejected, such as `rm -rf`, `sudo`, `chmod 777`, `curl | bash`, `git reset --hard`, `.env`, and `.ssh`.
 
 ## Human Review
@@ -51,16 +51,15 @@ The graph compacts old messages when message count or estimated characters excee
 
 ## Tools
 
-The model can call bounded filesystem, search, shell, and git tools. `read_file` returns a limited text window by default; the agent must request later `start_line` values to continue reading. Shell commands run through the configured sandbox backend.
+The model can call bounded filesystem, search, shell, and git tools. `read_file` returns a limited text window by default; the agent must request later `start_line` values to continue reading. Shell commands run locally from the workspace root.
 
 ## Shell Sandbox
 
 The CLI prints the active shell sandbox at startup and `/doctor` reports it as `shell_sandbox`.
 
-- `CODE_AGENT_SHELL_SANDBOX=local` runs commands through the host shell in the workspace.
-- `CODE_AGENT_SHELL_SANDBOX=docker` runs commands with `docker run --rm --workdir /workspace ... sh -lc "<command>"`.
-- For Node/Vite work in Docker, use an image with Node installed, for example `CODE_AGENT_DOCKER_IMAGE=node:22-bookworm`.
-- Tool results contain only command output; sandbox backend details stay in host/runtime metadata.
+- Shell commands run through the host shell in the workspace root.
+- Use relative paths from the project root in `run_shell` commands.
+- Tool results contain only command output; runtime details stay in host/runtime metadata.
 
 ## Useful Commands
 
