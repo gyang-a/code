@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from code_agent.config import AgentConfig
 from code_agent.services.skills import SkillStore, format_skill_index, normalize_skill_name
 from code_agent.services.summarizer import truncate
-from code_agent.services.trace import should_review_trace
+from code_agent.services.trace import reviewable_project_trace, should_review_trace
 
 
 DEFAULT_REVIEW_TOOL_THRESHOLD = 4
@@ -104,7 +104,7 @@ def review_turn_for_skills(
             return SkillReviewResult(status="none", message=str(data.get("reason") or "No reusable skill update."))
 
         skill_name = normalize_skill_name(str(data.get("skill_name") or "learned-skill"))
-        content = str(data.get("content") or "")
+        content = _normalize_skill_markdown(str(data.get("content") or ""))
         reason = str(data.get("reason") or "Background review proposed a reusable skill update.")
         change = store.stage_skill_change(
             skill_name=skill_name,
@@ -157,20 +157,23 @@ def review_trace_for_skills(
             return SkillReviewResult(status="none", message=str(data.get("reason") or "No reusable skill update."))
 
         target_skill = _target_skill_name(str(data.get("target_skill") or data.get("skill_name") or "learned-skill"))
-        content = str(data.get("proposed_content") or data.get("content") or "")
+        content = _normalize_skill_markdown(str(data.get("proposed_content") or data.get("content") or ""))
         reason = str(data.get("reason") or "Trace review proposed a reusable skill update.")
         operation = _operation_from_decision(data)
         confidence = _confidence_from_decision(data)
+        latest_turn = _latest_turn(trace)
         change = store.stage_skill_change(
             skill_name=target_skill,
             content=content,
             reason=f"{reason} Confidence: {confidence:.2f}.",
             action=operation,
             source={
-                "kind": "turn_trace",
+                "kind": "project_trace",
                 "trace_path": str(trace.get("trace_path") or ""),
-                "turn_id": str(trace.get("turn_id") or ""),
-                "thread_id": str(trace.get("thread_id") or ""),
+                "turn_id": str(latest_turn.get("turn_id") or trace.get("turn_id") or ""),
+                "latest_turn_id": str(trace.get("latest_turn_id") or latest_turn.get("turn_id") or ""),
+                "thread_id": str(latest_turn.get("thread_id") or trace.get("thread_id") or ""),
+                "turn_count": int(trace.get("turn_count") or 0),
                 "skill_type": str(data.get("skill_type") or "global"),
                 "confidence": confidence,
                 "decision": {
@@ -220,16 +223,18 @@ def _build_trace_review_prompt(
     trace: Mapping[str, Any],
     skill_index: str,
 ) -> str:
-    trace_json = json.dumps(trace, indent=2, ensure_ascii=False)
+    review_trace = reviewable_project_trace(trace)
+    trace_json = json.dumps(review_trace, indent=2, ensure_ascii=False)
     return f"""
 Available global skills:
 {skill_index}
 
-Review this structured turn trace. It is the source of truth for the user's goal,
-tool calls, tool results, file changes, errors, validation, feedback, and final answer.
-Do not infer tool execution from compressed conversation memory.
+Review this structured project trace. It is the source of truth for the user's goals,
+feedback across turns, tool calls, tool results, file changes, errors, validation, final
+answers, and existing skills. Do not infer tool execution from compressed conversation
+memory.
 
-Turn trace:
+Project trace:
 {truncate(trace_json, 18_000)}
 """.strip()
 
@@ -416,6 +421,24 @@ def _confidence_from_decision(data: Mapping[str, Any]) -> float:
     return max(0.0, min(confidence, 1.0))
 
 
+def _latest_turn(trace: Mapping[str, Any]) -> Mapping[str, Any]:
+    turns = trace.get("turns")
+    if isinstance(turns, list) and turns and isinstance(turns[-1], Mapping):
+        return turns[-1]
+    return trace
+
+
+def _normalize_skill_markdown(content: str) -> str:
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:markdown|md)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
 _REVIEW_SYSTEM_PROMPT = """
 You are a background skill reviewer for a coding agent.
 
@@ -447,10 +470,11 @@ name and description. Keep the skill concise, procedural, and free of project se
 _TRACE_REVIEW_SYSTEM_PROMPT = """
 You are a background skill reviewer for a coding agent.
 
-Read the structured turn trace and decide whether it reveals reusable procedural
-knowledge that should become a skill. Prefer durable workflows, repeated recovery
-patterns, user corrections, workspace conventions that future runs should obey, and
-non-obvious tool sequences. Do not create skills for one-off facts, secrets, private
+Read the structured project trace and decide whether it reveals reusable procedural
+knowledge that should become a skill. Pay attention to user feedback and corrections
+across multiple turns, not only the latest request. Prefer durable workflows, repeated
+recovery patterns, user corrections, workspace conventions that future runs should obey,
+and non-obvious tool sequences. Do not create skills for one-off facts, secrets, private
 data, or generic coding advice.
 
 Respond with only one JSON object matching this schema:

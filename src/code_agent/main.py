@@ -552,21 +552,21 @@ def _save_turn_trace(
     final_answer: str,
     user_feedback: str = "",
 ) -> Mapping[str, Any]:
-    from code_agent.services.trace import write_turn_trace
+    from code_agent.services.trace import append_turn_trace
 
     existing_skills = SkillStore().list_skills()
-    trace_payload = trace_recorder.build_trace(
+    turn_trace = trace_recorder.build_trace(
         final_answer=final_answer,
         existing_skills=existing_skills,
         user_feedback=user_feedback,
     )
-    path = write_turn_trace(session.workspace, trace_payload)
+    path, project_trace = append_turn_trace(session.workspace, turn_trace)
     try:
         rel_path = Path(path).resolve().relative_to(Path(session.workspace).resolve()).as_posix()
     except ValueError:
         rel_path = str(path)
     console.print(f"[dim]Trace saved: {rel_path}[/dim]")
-    return trace_payload
+    return project_trace
 
 
 def _review_trace_for_skills(session: Session, trace_payload: Mapping[str, Any]) -> None:

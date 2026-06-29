@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import uuid
 from collections.abc import Mapping
@@ -18,9 +17,16 @@ from code_agent.services.summarizer import truncate
 
 STATE_DIR = ".code-agent"
 TRACE_DIR = "traces"
+PROJECT_TRACE_FILE = "project_trace.json"
+DEFAULT_REVIEW_RECENT_TURNS = 8
+SUMMARY_LIST_LIMIT = 40
 WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
 VALIDATION_TOOL_NAMES = {"git_status", "git_diff"}
 SENSITIVE_KEY_RE = re.compile(r"(api[_-]?key|token|secret|password|passwd|credential)", re.I)
+FEEDBACK_RE = re.compile(
+    r"(\u4e0d\u5bf9|\u4e0d\u662f|\u4e0d\u5e94\u8be5|\u5e94\u8be5|\u95ee\u9898|\u5931\u8d25|\u9519\u4e86|\u9519\u8bef|\u522b|\u4e0d\u8981|\u4ee5\u540e|\u4e0b\u6b21|\u8bb0\u4f4f|\u6ee1\u610f|bug|wrong|should|shouldn't|do not)",
+    re.I,
+)
 
 
 @dataclass
@@ -145,24 +151,85 @@ class TurnTraceRecorder:
             existing_skills=existing_skills,
             user_feedback=user_feedback,
         )
-        return write_turn_trace(self.workspace, trace)
+        path, _project_trace = append_turn_trace(self.workspace, trace)
+        return path
 
 
 def trace_root(workspace: str | Path) -> Path:
     return Path(workspace).expanduser().resolve() / STATE_DIR / TRACE_DIR
 
 
-def write_turn_trace(workspace: str | Path, trace: dict[str, Any]) -> Path:
-    root = trace_root(workspace)
-    root.mkdir(parents=True, exist_ok=True)
+def project_trace_path(workspace: str | Path) -> Path:
+    return trace_root(workspace) / PROJECT_TRACE_FILE
+
+
+def append_turn_trace(workspace: str | Path, turn_trace: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    path = project_trace_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
     ensure_agent_state_ignored(workspace)
 
-    safe_turn_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(trace.get("turn_id") or "turn"))
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = root / f"{timestamp}_{safe_turn_id}.json"
-    trace["trace_path"] = str(path)
-    path.write_text(json.dumps(trace, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="")
+    project_trace = load_project_trace(workspace)
+    turn_trace["trace_path"] = str(path)
+    project_trace["workspace"] = str(Path(workspace).expanduser().resolve())
+    project_trace["updated_at"] = _utc_now()
+    project_trace["trace_path"] = str(path)
+    project_trace["latest_turn_id"] = str(turn_trace.get("turn_id") or "")
+    project_trace["existing_skills"] = list(turn_trace.get("existing_skills") or [])
+    project_trace.setdefault("turns", []).append(turn_trace)
+    project_trace["turn_count"] = len(project_trace["turns"])
+    project_trace["summary"] = _update_summary(
+        _normalize_summary(project_trace.get("summary")),
+        turn_trace,
+        turn_count=project_trace["turn_count"],
+    )
+
+    path.write_text(json.dumps(project_trace, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="")
+    return path, project_trace
+
+
+def write_turn_trace(workspace: str | Path, trace: dict[str, Any]) -> Path:
+    path, _project_trace = append_turn_trace(workspace, trace)
     return path
+
+
+def load_project_trace(workspace: str | Path) -> dict[str, Any]:
+    path = project_trace_path(workspace)
+    if not path.is_file():
+        return _new_project_trace(workspace, path)
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _new_project_trace(workspace, path)
+    if not isinstance(data, dict):
+        return _new_project_trace(workspace, path)
+    return _normalize_project_trace(data, workspace, path)
+
+
+def reviewable_project_trace(
+    project_trace: Mapping[str, Any],
+    *,
+    recent_turns_limit: int = DEFAULT_REVIEW_RECENT_TURNS,
+) -> dict[str, Any]:
+    turns = project_trace.get("turns")
+    turn_list = turns if isinstance(turns, list) else []
+    if not turn_list and project_trace.get("user_request"):
+        return dict(project_trace)
+
+    recent_turns = turn_list[-recent_turns_limit:]
+    return {
+        "schema_version": project_trace.get("schema_version", 1),
+        "workspace": project_trace.get("workspace", ""),
+        "trace_path": project_trace.get("trace_path", ""),
+        "created_at": project_trace.get("created_at", ""),
+        "updated_at": project_trace.get("updated_at", ""),
+        "turn_count": len(turn_list),
+        "omitted_older_turns": max(0, len(turn_list) - len(recent_turns)),
+        "latest_turn_id": project_trace.get("latest_turn_id", ""),
+        "existing_skills": project_trace.get("existing_skills", []),
+        "historical_summary": _normalize_summary(project_trace.get("summary")),
+        "recent_turns": recent_turns,
+    }
 
 
 def ensure_agent_state_ignored(workspace: str | Path) -> None:
@@ -184,15 +251,13 @@ def ensure_agent_state_ignored(workspace: str | Path) -> None:
 
 
 def should_review_trace(trace: Mapping[str, Any], *, tool_threshold: int = 4) -> bool:
-    tool_trace = trace.get("tool_trace")
-    steps = tool_trace if isinstance(tool_trace, list) else []
-    if len(steps) >= tool_threshold:
-        return True
-    if trace.get("file_changes"):
-        return True
-    if trace.get("errors"):
-        return True
-    return any(str(step.get("tool") or "") in WRITE_TOOL_NAMES for step in steps if isinstance(step, Mapping))
+    turns = trace.get("turns")
+    if isinstance(turns, list) and turns:
+        latest_turn = turns[-1]
+        if isinstance(latest_turn, Mapping):
+            return _should_review_turn(latest_turn, tool_threshold=tool_threshold)
+        return False
+    return _should_review_turn(trace, tool_threshold=tool_threshold)
 
 
 def sanitize_json(value: Any, *, max_string: int = 1200) -> Any:
@@ -212,6 +277,157 @@ def sanitize_json(value: Any, *, max_string: int = 1200) -> Any:
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return truncate(str(value), max_string)
+
+
+def _new_project_trace(workspace: str | Path, path: Path) -> dict[str, Any]:
+    now = _utc_now()
+    return {
+        "schema_version": 1,
+        "workspace": str(Path(workspace).expanduser().resolve()),
+        "trace_path": str(path),
+        "created_at": now,
+        "updated_at": now,
+        "turn_count": 0,
+        "latest_turn_id": "",
+        "existing_skills": [],
+        "summary": _new_summary(),
+        "turns": [],
+    }
+
+
+def _normalize_project_trace(data: dict[str, Any], workspace: str | Path, path: Path) -> dict[str, Any]:
+    normalized = _new_project_trace(workspace, path)
+    normalized.update(data)
+    turns = normalized.get("turns")
+    normalized["turns"] = turns if isinstance(turns, list) else []
+    normalized["turn_count"] = len(normalized["turns"])
+    normalized["trace_path"] = str(path)
+    normalized["summary"] = _normalize_summary(normalized.get("summary"))
+    return normalized
+
+
+def _new_summary() -> dict[str, Any]:
+    return {
+        "turn_count": 0,
+        "threads": [],
+        "tool_usage": {},
+        "changed_files": [],
+        "errors": [],
+        "user_feedback": [],
+        "recent_user_requests": [],
+        "validation": [],
+    }
+
+
+def _normalize_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return _new_summary()
+
+    summary = _new_summary()
+    summary.update(dict(value))
+    for key in ("threads", "changed_files", "errors", "user_feedback", "recent_user_requests", "validation"):
+        if not isinstance(summary.get(key), list):
+            summary[key] = []
+        summary[key] = list(summary[key])[-SUMMARY_LIST_LIMIT:]
+    if not isinstance(summary.get("tool_usage"), Mapping):
+        summary["tool_usage"] = {}
+    else:
+        summary["tool_usage"] = {
+            str(key): int(count)
+            for key, count in summary["tool_usage"].items()
+            if _is_int_like(count)
+        }
+    summary["turn_count"] = int(summary.get("turn_count") or 0)
+    return summary
+
+
+def _update_summary(summary: dict[str, Any], turn_trace: Mapping[str, Any], *, turn_count: int) -> dict[str, Any]:
+    turn_id = str(turn_trace.get("turn_id") or "")
+    thread_id = str(turn_trace.get("thread_id") or "")
+    summary["turn_count"] = turn_count
+    if thread_id and thread_id not in summary["threads"]:
+        summary["threads"] = _append_capped(summary["threads"], thread_id)
+
+    request = str(turn_trace.get("user_request") or "")
+    if request:
+        summary["recent_user_requests"] = _append_capped(
+            summary["recent_user_requests"],
+            {"turn_id": turn_id, "request": truncate(request, 500)},
+        )
+    if turn_trace.get("user_feedback") or FEEDBACK_RE.search(request):
+        feedback = str(turn_trace.get("user_feedback") or request)
+        summary["user_feedback"] = _append_capped(
+            summary["user_feedback"],
+            {"turn_id": turn_id, "feedback": truncate(feedback, 800)},
+        )
+
+    for step in _list_of_mappings(turn_trace.get("tool_trace")):
+        tool = str(step.get("tool") or "unknown")
+        summary["tool_usage"][tool] = int(summary["tool_usage"].get(tool, 0)) + 1
+
+    for change in _list_of_mappings(turn_trace.get("file_changes")):
+        summary["changed_files"] = _append_capped(
+            summary["changed_files"],
+            {
+                "turn_id": turn_id,
+                "path": change.get("path"),
+                "operation": change.get("operation"),
+            },
+        )
+
+    for error in _list_of_mappings(turn_trace.get("errors")):
+        summary["errors"] = _append_capped(
+            summary["errors"],
+            {
+                "turn_id": turn_id,
+                "tool": error.get("tool"),
+                "status": error.get("status"),
+                "message": truncate(str(error.get("message") or ""), 800),
+            },
+        )
+
+    validation = str(turn_trace.get("validation") or "")
+    if validation:
+        summary["validation"] = _append_capped(
+            summary["validation"],
+            {"turn_id": turn_id, "result": truncate(validation, 800)},
+        )
+    return summary
+
+
+def _should_review_turn(trace: Mapping[str, Any], *, tool_threshold: int) -> bool:
+    tool_trace = trace.get("tool_trace")
+    steps = tool_trace if isinstance(tool_trace, list) else []
+    if len(steps) >= tool_threshold:
+        return True
+    if trace.get("file_changes"):
+        return True
+    if trace.get("errors"):
+        return True
+    if trace.get("user_feedback"):
+        return True
+    if FEEDBACK_RE.search(str(trace.get("user_request") or "")):
+        return True
+    return any(str(step.get("tool") or "") in WRITE_TOOL_NAMES for step in steps if isinstance(step, Mapping))
+
+
+def _append_capped(items: list[Any], item: Any, *, limit: int = SUMMARY_LIST_LIMIT) -> list[Any]:
+    items.append(item)
+    return items[-limit:]
+
+
+def _list_of_mappings(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _is_int_like(value: Any) -> bool:
+    try:
+        int(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _status_from_tool_result(content: str) -> str:

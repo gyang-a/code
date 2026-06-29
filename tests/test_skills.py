@@ -8,6 +8,7 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage, ToolMessage
 
 from code_agent.services.skill_review import (
+    _normalize_skill_markdown,
     count_tool_results,
     should_review_skills,
     skill_review_trigger_reason,
@@ -125,6 +126,11 @@ class SkillTests(unittest.TestCase):
             skill_review_trigger_reason(messages, reviewed_tool_count=10, threshold=5),
             "Recent write tool result detected.",
         )
+
+    def test_skill_review_normalizes_missing_skill_newline(self) -> None:
+        content = "---\nname: demo\ndescription: demo skill\n---\n\n# Demo"
+
+        self.assertTrue(_normalize_skill_markdown(content).endswith("\n"))
 
 
 if __name__ == "__main__":

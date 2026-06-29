@@ -6,7 +6,13 @@ import unittest
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from code_agent.services.trace import TurnTraceRecorder, write_turn_trace
+from code_agent.services.trace import (
+    TurnTraceRecorder,
+    append_turn_trace,
+    load_project_trace,
+    reviewable_project_trace,
+    should_review_trace,
+)
 
 
 class TraceTests(unittest.TestCase):
@@ -53,20 +59,79 @@ class TraceTests(unittest.TestCase):
                 [{"path": "src/app.py", "operation": "write", "call_id": "call_1"}],
             )
 
-    def test_write_turn_trace_uses_workspace_local_state_dir(self) -> None:
+    def test_append_turn_trace_uses_one_workspace_project_trace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            trace = {
+            first_turn = {
                 "turn_id": "turn_001",
                 "thread_id": "thread_1",
+                "user_request": "first",
+                "tool_trace": [],
+            }
+            second_turn = {
+                "turn_id": "turn_002",
+                "thread_id": "thread_1",
+                "user_request": "second",
                 "tool_trace": [],
             }
 
-            path = write_turn_trace(tmp, trace)
+            first_path, first_project_trace = append_turn_trace(tmp, first_turn)
+            second_path, second_project_trace = append_turn_trace(tmp, second_turn)
 
-            self.assertTrue(path.is_file())
-            self.assertEqual(path.parent, Path(tmp).resolve() / ".code-agent" / "traces")
-            self.assertEqual(trace["trace_path"], str(path))
+            self.assertEqual(first_path, second_path)
+            self.assertEqual(second_path, Path(tmp).resolve() / ".code-agent" / "traces" / "project_trace.json")
+            self.assertTrue(second_path.is_file())
+            self.assertEqual(first_project_trace["turn_count"], 1)
+            self.assertEqual(second_project_trace["turn_count"], 2)
+            self.assertEqual([turn["turn_id"] for turn in second_project_trace["turns"]], ["turn_001", "turn_002"])
+            self.assertEqual(load_project_trace(tmp)["turn_count"], 2)
             self.assertTrue((Path(tmp) / ".code-agent" / ".gitignore").is_file())
+
+    def test_project_trace_review_triggers_on_user_feedback(self) -> None:
+        trace = {
+            "turns": [
+                {
+                    "turn_id": "turn_001",
+                    "user_request": "\u8fd9\u4e0d\u5bf9\uff0c\u4ee5\u540e\u4e0d\u8981\u8fd9\u4e48\u505a",
+                    "tool_trace": [],
+                    "file_changes": [],
+                    "errors": [],
+                }
+            ]
+        }
+
+        self.assertTrue(should_review_trace(trace))
+
+    def test_reviewable_project_trace_uses_summary_and_recent_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for index in range(12):
+                append_turn_trace(
+                    tmp,
+                    {
+                        "turn_id": f"turn_{index:03d}",
+                        "thread_id": "thread_1",
+                        "user_request": f"request {index}",
+                        "tool_trace": [
+                            {
+                                "type": "tool_call",
+                                "tool": "read_file",
+                                "args": {"path": f"file_{index}.py"},
+                                "status": "success",
+                            }
+                        ],
+                        "file_changes": [],
+                        "errors": [],
+                    },
+                )
+
+            project_trace = load_project_trace(tmp)
+            review_trace = reviewable_project_trace(project_trace, recent_turns_limit=3)
+
+            self.assertEqual(review_trace["turn_count"], 12)
+            self.assertEqual(review_trace["omitted_older_turns"], 9)
+            self.assertEqual([turn["turn_id"] for turn in review_trace["recent_turns"]], ["turn_009", "turn_010", "turn_011"])
+            self.assertNotIn("turns", review_trace)
+            self.assertEqual(review_trace["historical_summary"]["turn_count"], 12)
+            self.assertEqual(review_trace["historical_summary"]["tool_usage"]["read_file"], 12)
 
 
 if __name__ == "__main__":

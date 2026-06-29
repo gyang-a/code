@@ -86,15 +86,19 @@ proposed skill changes for review instead of writing them directly. Use:
 
 ## Turn Traces
 
-Each agent turn writes an audit record under the selected workspace:
+Each agent turn appends an audit record to one project trace under the selected
+workspace:
 
 ```text
-.code-agent/traces/<timestamp>_<turn-id>.json
+.code-agent/traces/project_trace.json
 ```
 
 The trace directory is local state. Code Agent writes `.code-agent/.gitignore` and, when
 the workspace is a Git repository, adds `.code-agent/` to `.git/info/exclude` so traces
-and checkpoints are not tracked by project Git history.
+and checkpoints are not tracked by project Git history. Skill review reads this project
+trace so user feedback and corrections across turns are visible. When the project trace
+grows, review receives a bounded view: a structured historical summary plus the most
+recent raw turns, rather than the full trace file.
 
 ## Tools
 

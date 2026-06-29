@@ -18,9 +18,3 @@ class AgentState(TypedDict, total=False):
 
     tool_errors: NotRequired[list[str]]
     final_answer: NotRequired[str | None]
-
-    skill_reviewed_tool_count: NotRequired[int]
-    skill_review_status: NotRequired[str]
-    skill_review_message: NotRequired[str]
-    skill_review_pending_id: NotRequired[str | None]
-    skill_review_trigger: NotRequired[str | None]
