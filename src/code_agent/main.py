@@ -22,7 +22,7 @@ from code_agent.services.persistence import (
     record_session,
     SessionRecord,
 )
-from code_agent.services.skills import SkillStore, format_pending_summary, format_skill_index
+from code_agent.services.skills import SkillStore, format_pending_summary, format_skill_index, legacy_pending_skill_root
 from code_agent.services.summarizer import truncate
 from code_agent.services.usage import (
     TokenUsage,
@@ -238,7 +238,11 @@ def _handle_skills_command(arg: str) -> None:
         if command in {"list", "ls"}:
             _print_raw(format_skill_index(store.list_skills()))
         elif command == "path":
-            _print_raw(f"skills: {store.skills_dir}\npending: {store.pending_dir}")
+            _print_raw(
+                f"skills: {store.skills_dir}\n"
+                f"pending: {store.pending_dir}\n"
+                f"legacy pending fallback: {legacy_pending_skill_root()}"
+            )
         elif command == "pending":
             _print_raw(format_pending_summary(store.list_pending()))
         elif command == "view" and len(parts) >= 2:
@@ -300,7 +304,9 @@ def _format_sessions(records: list[SessionRecord]) -> str:
 
     lines = ["Saved sessions:"]
     for index, record in enumerate(records, start=1):
-        lines.append(f"{index}. {record.thread_id}  {record.updated_at}  {record.title}")
+        lines.append(f"{index}. {record.thread_id}")
+        lines.append(f"   updated_at: {record.updated_at}")
+        lines.append(f"   title: {record.title}")
     return "\n".join(lines)
 
 
@@ -459,6 +465,7 @@ def _run_interactive_session(
                         values = state.values
                         final_answer = values.get("final_answer") or values["messages"][-1].content
                         break
+                    trace_recorder.record_interrupt(interrupts)
                     decisions = _prompt_approval_decisions(interrupts[0].value)
                     if any(decision.get("type") in {"approve", "edit"} for decision in decisions):
                         console.print("[dim]Executing approved action(s).[/dim]")
@@ -576,24 +583,51 @@ def _review_trace_for_skills(session: Session, trace_payload: Mapping[str, Any])
         trace=trace_payload,
         config=AgentConfig(model=session.model),
     )
+    if result.status == "proposed":
+        _prompt_skill_review_approval(result)
+        return
+
     _print_skill_review_result(
         {
             "skill_review_status": result.status,
             "skill_review_message": result.message,
-            "skill_review_pending_id": result.pending_id,
         }
     )
 
 
+def _prompt_skill_review_approval(result: Any) -> None:
+    if not result.skill_name or result.content is None:
+        _print_raw("Skill review failed: proposal is missing skill name or content.")
+        return
+
+    store = SkillStore()
+    try:
+        diff = store.skill_diff(result.skill_name, result.content, tofile=f"proposed:{result.skill_name}")
+    except Exception as exc:
+        _print_raw(f"Skill review failed: {exc}")
+        return
+
+    console.print(
+        f"\n[bold yellow]Skill approval required[/bold yellow] "
+        f"[{result.action or 'write'}] {result.skill_name}"
+    )
+    _print_raw(f"{result.message}\n\n{diff}")
+    approved = Prompt.ask("Approve this skill change?", choices=["y", "n"], default="n")
+    if approved != "y":
+        _print_raw("Skill change rejected.")
+        return
+
+    try:
+        path = store.write_skill(result.skill_name, result.content)
+    except Exception as exc:
+        _print_raw(f"Skill write failed: {exc}")
+        return
+    _print_raw(f"Approved skill change; wrote {path}")
+
+
 def _print_skill_review_result(state_values: Mapping[str, Any]) -> None:
     status = str(state_values.get("skill_review_status") or "")
-    if status == "staged":
-        pending_id = state_values.get("skill_review_pending_id")
-        console.print(
-            f"[dim]{state_values.get('skill_review_message')} "
-            f"Use /skills diff {pending_id} to inspect.[/dim]"
-        )
-    elif status == "none":
+    if status == "none":
         console.print(f"[dim]Skill review ran: {state_values.get('skill_review_message')}[/dim]")
     elif status == "error":
         console.print(f"[dim]{state_values.get('skill_review_message')}[/dim]")

@@ -13,7 +13,8 @@ from code_agent.graph import (
     _approval_interrupt_config,
     build_tools,
 )
-from code_agent.main import _is_slash_command, _parse_undo_args, _print_raw, _resolve_chat_workspace
+from code_agent.main import _format_sessions, _is_slash_command, _parse_undo_args, _print_raw, _resolve_chat_workspace
+from code_agent.services.persistence import SessionRecord
 from code_agent.services.workspace import Workspace
 from code_agent.ui.stream import _should_render_update, _tool_result_summary
 
@@ -52,6 +53,23 @@ class GraphRoutingTests(unittest.TestCase):
             _print_raw("diff contains [/not-open]")
 
         print_mock.assert_called_once_with("diff contains [/not-open]", markup=False, highlight=False)
+
+    def test_session_list_formats_full_title_on_own_line(self) -> None:
+        long_title = "项目名称：" + "个人备忘录管理系统" * 20
+        rendered = _format_sessions(
+            [
+                SessionRecord(
+                    thread_id="thread_1",
+                    title=long_title,
+                    created_at="2026-06-29T00:00:00+00:00",
+                    updated_at="2026-06-29T01:00:00+00:00",
+                )
+            ]
+        )
+
+        self.assertIn("1. thread_1", rendered)
+        self.assertIn("updated_at: 2026-06-29T01:00:00+00:00", rendered)
+        self.assertIn(f"title: {long_title}", rendered)
 
     def test_tool_result_summary_returns_plain_tool_output(self) -> None:
         summary = _tool_result_summary("hello from command")

@@ -8,7 +8,7 @@ from langchain_core.tools import tool
 from code_agent.services.patcher import replace_exact_once
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
-from code_agent.tools.safety import classify_tool_call, rejected
+from code_agent.tools.safety import RiskLevel, classify_tool_call, rejected
 from code_agent.tools.schemas import (
     CreateFileInput,
     DeleteFileInput,
@@ -33,7 +33,7 @@ def _error(exc: Exception) -> str:
 
 def _decision_rejected(workspace: Workspace, tool_name: str, payload: dict) -> str | None:
     decision = classify_tool_call(workspace, tool_name, payload)
-    if decision.risk.value == "level_3":
+    if decision.risk == RiskLevel.level_3:
         return rejected(decision.risk, decision.reason)
 
     return None

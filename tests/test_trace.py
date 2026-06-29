@@ -59,6 +59,43 @@ class TraceTests(unittest.TestCase):
                 [{"path": "src/app.py", "operation": "write", "call_id": "call_1"}],
             )
 
+    def test_turn_trace_records_interrupt_action_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = TurnTraceRecorder(
+                workspace=tmp,
+                thread_id="thread_1",
+                user_request="edit package",
+            )
+
+            recorder.record_interrupt(
+                [
+                    {
+                        "value": {
+                            "action_requests": [
+                                {
+                                    "id": "call_1",
+                                    "name": "patch_file",
+                                    "args": {"path": "package.json", "old": "a", "new": "b"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            )
+            recorder.record_message(
+                ToolMessage(
+                    content="Patched package.json",
+                    name="patch_file",
+                    tool_call_id="call_1",
+                )
+            )
+
+            trace = recorder.build_trace(final_answer="done", existing_skills=[])
+
+            self.assertEqual(trace["tool_trace"][0]["tool"], "patch_file")
+            self.assertEqual(trace["tool_trace"][0]["args"]["path"], "package.json")
+            self.assertEqual(trace["tool_trace"][0]["status"], "success")
+
     def test_append_turn_trace_uses_one_workspace_project_trace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             first_turn = {
@@ -132,6 +169,27 @@ class TraceTests(unittest.TestCase):
             self.assertNotIn("turns", review_trace)
             self.assertEqual(review_trace["historical_summary"]["turn_count"], 12)
             self.assertEqual(review_trace["historical_summary"]["tool_usage"]["read_file"], 12)
+
+    def test_reviewable_project_trace_defaults_to_recent_10_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for index in range(12):
+                append_turn_trace(
+                    tmp,
+                    {
+                        "turn_id": f"turn_{index:03d}",
+                        "thread_id": "thread_1",
+                        "user_request": f"request {index}",
+                        "tool_trace": [],
+                        "file_changes": [],
+                        "errors": [],
+                    },
+                )
+
+            review_trace = reviewable_project_trace(load_project_trace(tmp))
+
+            self.assertEqual(review_trace["omitted_older_turns"], 2)
+            self.assertEqual(len(review_trace["recent_turns"]), 10)
+            self.assertEqual(review_trace["recent_turns"][0]["turn_id"], "turn_002")
 
 
 if __name__ == "__main__":

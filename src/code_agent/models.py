@@ -17,8 +17,3 @@ class PermissionDecision(BaseModel):
     allowed: bool
     requires_approval: bool = False
     reason: str
-
-
-class ToolFailure(BaseModel):
-    error: str
-    hint: str | None = None

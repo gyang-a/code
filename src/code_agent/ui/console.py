@@ -45,7 +45,7 @@ def print_help() -> None:
         ("/undo [path]", "Restore tracked git changes; add --include-untracked to delete new files."),
         ("/doctor", "Check dependencies, environment variables, and workspace status."),
         ("/usage", "Show local interaction and token usage."),
-        ("/skills", "List global skills and pending skill changes."),
+        ("/skills", "List saved skills; legacy pending review commands are available."),
         ("/sessions", "List saved conversation threads for this workspace."),
         ("/resume [id]", "List saved threads or switch to a saved thread."),
         ("/mcp", "Reserved MCP integration entry point."),

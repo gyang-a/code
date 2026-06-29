@@ -14,8 +14,9 @@ from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import WorkspaceError
 
 
-DEFAULT_SKILL_ROOT = "~/.code-agent/skills"
-DEFAULT_PENDING_SKILL_ROOT = "~/.code-agent/pending/skills"
+CODE_AGENT_STATE_DIR = ".code-agent"
+LEGACY_SKILL_ROOT = "~/.code-agent/skills"
+LEGACY_PENDING_SKILL_ROOT = "~/.code-agent/pending/skills"
 SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
@@ -38,13 +39,39 @@ class PendingSkillChange:
 
 
 def default_skill_root() -> Path:
-    return Path(os.getenv("CODE_AGENT_SKILLS_DIR", DEFAULT_SKILL_ROOT)).expanduser().resolve()
+    override = os.getenv("CODE_AGENT_SKILLS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return code_agent_state_root() / "skills"
 
 
 def default_pending_skill_root() -> Path:
-    return Path(
-        os.getenv("CODE_AGENT_PENDING_SKILLS_DIR", DEFAULT_PENDING_SKILL_ROOT)
-    ).expanduser().resolve()
+    override = os.getenv("CODE_AGENT_PENDING_SKILLS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return code_agent_state_root() / "pending" / "skills"
+
+
+def code_agent_state_root() -> Path:
+    override = os.getenv("CODE_AGENT_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    return code_agent_project_root() / CODE_AGENT_STATE_DIR
+
+
+def code_agent_project_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file() and (parent / "src" / "code_agent").is_dir():
+            return parent
+    return Path.home().expanduser().resolve()
+
+
+def legacy_skill_root() -> Path:
+    return Path(LEGACY_SKILL_ROOT).expanduser().resolve()
+
+
+def legacy_pending_skill_root() -> Path:
+    return Path(LEGACY_PENDING_SKILL_ROOT).expanduser().resolve()
 
 
 def normalize_skill_name(value: str) -> str:
@@ -107,6 +134,7 @@ class SkillStore:
             if pending_dir
             else default_pending_skill_root()
         )
+        self._use_legacy_pending = pending_dir is None and not os.getenv("CODE_AGENT_PENDING_SKILLS_DIR")
 
     @property
     def skills_dir(self) -> Path:
@@ -149,6 +177,31 @@ class SkillStore:
     def skill_exists(self, name: str) -> bool:
         validate_skill_name(name)
         return self._skill_file(name).is_file()
+
+    def skill_diff(self, skill_name: str, content: str, *, tofile: str = "proposed") -> str:
+        validate_skill_name(skill_name)
+        validate_skill_markdown(content, expected_name=skill_name)
+        current = ""
+        current_path = self._skill_file(skill_name)
+        if current_path.exists():
+            current = current_path.read_text(encoding="utf-8", errors="replace")
+
+        diff = difflib.unified_diff(
+            current.splitlines(keepends=True),
+            content.splitlines(keepends=True),
+            fromfile=str(current_path),
+            tofile=tofile,
+        )
+        rendered = "".join(diff)
+        return rendered or "NO_DIFF"
+
+    def write_skill(self, skill_name: str, content: str) -> Path:
+        validate_skill_name(skill_name)
+        validate_skill_markdown(content, expected_name=skill_name)
+        path = self._skill_file(skill_name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8", newline="")
+        return path
 
     def stage_skill_change(
         self,
@@ -193,58 +246,63 @@ class SkillStore:
         return change
 
     def list_pending(self) -> list[PendingSkillChange]:
-        root = self.pending_dir
-        if not root.exists():
-            return []
-
         changes: list[PendingSkillChange] = []
-        for path in sorted(root.glob("*.json")):
-            try:
-                changes.append(_pending_from_json(path.read_text(encoding="utf-8")))
-            except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        seen_ids: set[str] = set()
+        for root in self._pending_roots():
+            if not root.exists():
                 continue
+            for path in sorted(root.glob("*.json")):
+                try:
+                    change = _pending_from_json(path.read_text(encoding="utf-8"))
+                except (OSError, KeyError, TypeError, json.JSONDecodeError):
+                    continue
+                if change.id in seen_ids:
+                    continue
+                seen_ids.add(change.id)
+                changes.append(change)
         return changes
 
     def read_pending(self, pending_id: str) -> PendingSkillChange:
-        path = self._pending_path(pending_id)
+        path = self._existing_pending_path(pending_id)
         if not path.exists():
             raise WorkspaceError(f"Pending skill change not found: {pending_id}")
         return _pending_from_json(path.read_text(encoding="utf-8"))
 
     def pending_diff(self, pending_id: str) -> str:
         change = self.read_pending(pending_id)
-        current = ""
-        current_path = self._skill_file(change.skill_name)
-        if current_path.exists():
-            current = current_path.read_text(encoding="utf-8", errors="replace")
-
-        diff = difflib.unified_diff(
-            current.splitlines(keepends=True),
-            change.content.splitlines(keepends=True),
-            fromfile=str(current_path),
-            tofile=f"pending:{pending_id}",
-        )
-        rendered = "".join(diff)
-        return rendered or "NO_DIFF"
+        return self.skill_diff(change.skill_name, change.content, tofile=f"pending:{pending_id}")
 
     def approve_pending(self, pending_id: str) -> PendingSkillChange:
         change = self.read_pending(pending_id)
-        validate_skill_markdown(change.content, expected_name=change.skill_name)
-        path = self._skill_file(change.skill_name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(change.content, encoding="utf-8", newline="")
-        self._pending_path(pending_id).unlink()
+        self.write_skill(change.skill_name, change.content)
+        self._existing_pending_path(pending_id).unlink()
         return change
 
     def reject_pending(self, pending_id: str) -> PendingSkillChange:
         change = self.read_pending(pending_id)
-        self._pending_path(pending_id).unlink()
+        self._existing_pending_path(pending_id).unlink()
         return change
 
     def _pending_path(self, pending_id: str) -> Path:
         if not re.fullmatch(r"[a-f0-9]{12}", pending_id):
             raise WorkspaceError("Invalid pending skill change id.")
         return self._resolve_under(self.pending_dir, f"{pending_id}.json")
+
+    def _pending_roots(self) -> list[Path]:
+        roots = [self.pending_dir]
+        legacy = legacy_pending_skill_root()
+        if self._use_legacy_pending and legacy != self.pending_dir:
+            roots.append(legacy)
+        return roots
+
+    def _existing_pending_path(self, pending_id: str) -> Path:
+        if not re.fullmatch(r"[a-f0-9]{12}", pending_id):
+            raise WorkspaceError("Invalid pending skill change id.")
+        for root in self._pending_roots():
+            path = self._resolve_under(root, f"{pending_id}.json")
+            if path.exists():
+                return path
+        return self._pending_path(pending_id)
 
     def _skill_file(self, name: str) -> Path:
         validate_skill_name(name)

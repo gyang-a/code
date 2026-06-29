@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +10,7 @@ from typing import Any, Iterator
 
 STATE_DIR = ".code-agent"
 CHECKPOINT_DB = "checkpoints.sqlite3"
+MAX_SESSION_TITLE_CHARS = 4000
 
 
 @dataclass(frozen=True)
@@ -42,37 +43,39 @@ def open_project_checkpointer(workspace: str | Path) -> Iterator[Any]:
 def ensure_session_store(workspace: str | Path) -> None:
     path = checkpoint_db_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS code_agent_sessions (
-                thread_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+    with closing(sqlite3.connect(path)) as conn:
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS code_agent_sessions (
+                    thread_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
 
 
 def record_session(workspace: str | Path, thread_id: str, *, title: str | None = None) -> None:
     ensure_session_store(workspace)
     now = _utc_now()
     clean_title = _clean_title(title) if title else "Untitled conversation"
-    with sqlite3.connect(checkpoint_db_path(workspace)) as conn:
-        conn.execute(
-            """
-            INSERT INTO code_agent_sessions (thread_id, title, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(thread_id) DO UPDATE SET
-                title = CASE
-                    WHEN code_agent_sessions.title = 'Untitled conversation' THEN excluded.title
-                    ELSE code_agent_sessions.title
-                END,
-                updated_at = excluded.updated_at
-            """,
-            (thread_id, clean_title, now, now),
-        )
+    with closing(sqlite3.connect(checkpoint_db_path(workspace))) as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO code_agent_sessions (thread_id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    title = CASE
+                        WHEN code_agent_sessions.title = 'Untitled conversation' THEN excluded.title
+                        ELSE code_agent_sessions.title
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (thread_id, clean_title, now, now),
+            )
 
 
 def list_sessions(workspace: str | Path, *, limit: int | None = None) -> list[SessionRecord]:
@@ -87,7 +90,7 @@ def list_sessions(workspace: str | Path, *, limit: int | None = None) -> list[Se
         query += " LIMIT ?"
         params = (limit,)
 
-    with sqlite3.connect(checkpoint_db_path(workspace)) as conn:
+    with closing(sqlite3.connect(checkpoint_db_path(workspace))) as conn:
         rows = conn.execute(query, params).fetchall()
     return [record for row in rows if (record := _record_from_row(row)) is not None]
 
@@ -107,7 +110,7 @@ def _clean_title(title: str) -> str:
     text = " ".join(title.split())
     if not text:
         return "Untitled conversation"
-    return text[:80]
+    return text[:MAX_SESSION_TITLE_CHARS]
 
 
 def _utc_now() -> str:

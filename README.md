@@ -55,16 +55,16 @@ The graph compacts old messages when message count or estimated characters excee
 
 ## Global Skills
 
-Code Agent can use a global skill library across all workspaces. Skills live outside the
-current project by default:
+Code Agent can use a reusable skill library across all workspaces. By default, skills
+live in this Code Agent checkout, not in the workspace being edited:
 
 ```text
-~/.code-agent/skills/<skill-name>/SKILL.md
-~/.code-agent/pending/skills/<id>.json
+<code-agent-project>/.code-agent/skills/<skill-name>/SKILL.md
 ```
 
-Set `CODE_AGENT_SKILLS_DIR` or `CODE_AGENT_PENDING_SKILLS_DIR` to override those
-locations.
+Set `CODE_AGENT_HOME`, `CODE_AGENT_SKILLS_DIR`, or `CODE_AGENT_PENDING_SKILLS_DIR` to
+override those locations. Pending changes created by older versions under
+`~/.code-agent/pending/skills` are still readable so they can be approved or rejected.
 
 Each turn injects a compact global skill index into runtime metadata. The model can call
 `skills_list` and `skill_view` to load a relevant skill on demand.
@@ -72,12 +72,19 @@ Each turn injects a compact global skill index into runtime metadata. The model 
 After sufficiently tool-heavy work, or after write tools are used, a background reviewer
 checks whether durable procedural knowledge should be saved. The reviewer reads the
 structured turn trace, not compressed conversation state, so tool calls, results, file
-changes, errors, validation, final answer, and existing skills remain auditable. It stages
-proposed skill changes for review instead of writing them directly. Use:
+changes, errors, validation, final answer, and existing skills remain auditable. When it
+finds a useful skill, the CLI presents the proposed change like a tool approval: it prints
+the diff, asks for `y/n`, and writes the skill only after approval. Use:
 
 ```text
 /skills list
 /skills path
+/skills view <name>
+```
+
+Legacy pending proposals are still supported for old local data:
+
+```text
 /skills pending
 /skills diff <id>
 /skills approve <id>

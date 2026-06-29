@@ -13,3 +13,6 @@ dist/
 build/
 *.egg-info/
 .sqlite3
+.code-agent/checkpoints.sqlite3*
+.code-agent/pending/
+.code-agent/traces/

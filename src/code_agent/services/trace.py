@@ -18,7 +18,7 @@ from code_agent.services.summarizer import truncate
 STATE_DIR = ".code-agent"
 TRACE_DIR = "traces"
 PROJECT_TRACE_FILE = "project_trace.json"
-DEFAULT_REVIEW_RECENT_TURNS = 8
+DEFAULT_REVIEW_RECENT_TURNS = 10
 SUMMARY_LIST_LIMIT = 40
 WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
 VALIDATION_TOOL_NAMES = {"git_status", "git_diff"}
@@ -45,6 +45,9 @@ class TurnTraceRecorder:
         self._seen_tool_results: set[str] = set()
 
     def record_chunk(self, chunk: Mapping[str, Any]) -> None:
+        if "__interrupt__" in chunk:
+            self.record_interrupt(chunk["__interrupt__"])
+
         for update in chunk.values():
             if not isinstance(update, Mapping):
                 continue
@@ -61,8 +64,23 @@ class TurnTraceRecorder:
         elif isinstance(message, ToolMessage):
             self.record_tool_result(message)
 
+    def record_interrupt(self, interrupts: Any) -> None:
+        for interrupt in _as_list(interrupts):
+            value = interrupt.get("value") if isinstance(interrupt, Mapping) and "value" in interrupt else getattr(interrupt, "value", interrupt)
+            payload = value if isinstance(value, Mapping) else _object_fields(value, ("action_requests",))
+            action_requests = payload.get("action_requests")
+            if not isinstance(action_requests, list):
+                continue
+            for action in action_requests:
+                action_payload = action if isinstance(action, Mapping) else _object_fields(
+                    action,
+                    ("id", "name", "args", "action_name"),
+                )
+                if action_payload:
+                    self.record_tool_call(action_payload)
+
     def record_tool_call(self, tool_call: Mapping[str, Any]) -> None:
-        call_id = str(tool_call.get("id") or "")
+        call_id = _tool_call_id(tool_call)
         if call_id and call_id in self._seen_tool_calls:
             return
         if call_id:
@@ -71,12 +89,13 @@ class TurnTraceRecorder:
         step = {
             "type": "tool_call",
             "call_id": call_id or None,
-            "tool": str(tool_call.get("name") or "tool"),
-            "args": sanitize_json(tool_call.get("args") or {}),
+            "tool": _tool_call_name(tool_call),
+            "args": sanitize_json(_tool_call_args(tool_call)),
             "status": "pending",
             "started_at": _utc_now(),
         }
-        self._call_index[call_id] = len(self.tool_trace)
+        if call_id:
+            self._call_index[call_id] = len(self.tool_trace)
         self.tool_trace.append(step)
 
     def record_tool_result(self, message: ToolMessage) -> None:
@@ -185,11 +204,6 @@ def append_turn_trace(workspace: str | Path, turn_trace: dict[str, Any]) -> tupl
 
     path.write_text(json.dumps(project_trace, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="")
     return path, project_trace
-
-
-def write_turn_trace(workspace: str | Path, trace: dict[str, Any]) -> Path:
-    path, _project_trace = append_turn_trace(workspace, trace)
-    return path
 
 
 def load_project_trace(workspace: str | Path) -> dict[str, Any]:
@@ -420,6 +434,34 @@ def _list_of_mappings(value: Any) -> list[Mapping[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, Mapping)]
+
+
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value] if value else []
+
+
+def _tool_call_id(tool_call: Mapping[str, Any]) -> str:
+    return str(tool_call.get("id") or tool_call.get("call_id") or "")
+
+
+def _tool_call_name(tool_call: Mapping[str, Any]) -> str:
+    return str(tool_call.get("name") or tool_call.get("action_name") or "tool")
+
+
+def _tool_call_args(tool_call: Mapping[str, Any]) -> Any:
+    return tool_call.get("args") or {}
+
+
+def _object_fields(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for field_name in fields:
+        if hasattr(value, field_name):
+            data[field_name] = getattr(value, field_name)
+    return data
 
 
 def _is_int_like(value: Any) -> bool:

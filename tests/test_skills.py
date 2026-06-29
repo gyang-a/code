@@ -4,16 +4,10 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import os
 
-from langchain_core.messages import AIMessage, ToolMessage
-
-from code_agent.services.skill_review import (
-    _normalize_skill_markdown,
-    count_tool_results,
-    should_review_skills,
-    skill_review_trigger_reason,
-)
-from code_agent.services.skills import SkillStore, format_pending_summary, format_skill_index
+from code_agent.services.skill_review import _normalize_skill_markdown, _target_skill_name
+from code_agent.services.skills import SkillStore, default_pending_skill_root, default_skill_root, format_pending_summary, format_skill_index
 from code_agent.services.workspace import Workspace
 from code_agent.tools import build_skill_view_tool, build_skills_list_tool
 
@@ -60,6 +54,45 @@ class SkillTests(unittest.TestCase):
             self.assertTrue((Path(skills_dir) / "python-testing" / "SKILL.md").is_file())
             self.assertEqual(store.list_pending(), [])
 
+    def test_skill_change_can_be_written_directly_after_review_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as skills_dir, tempfile.TemporaryDirectory() as pending_dir:
+            store = SkillStore(skills_dir=skills_dir, pending_dir=pending_dir)
+
+            diff = store.skill_diff("python-testing", SKILL_MD, tofile="proposed:python-testing")
+            path = store.write_skill("python-testing", SKILL_MD)
+
+            self.assertIn("proposed:python-testing", diff)
+            self.assertEqual(path, Path(skills_dir).resolve() / "python-testing" / "SKILL.md")
+            self.assertEqual(path.read_text(encoding="utf-8"), SKILL_MD)
+            self.assertEqual(store.list_pending(), [])
+
+    def test_default_skill_roots_use_code_agent_home(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            with patch.dict(os.environ, {"CODE_AGENT_HOME": state_dir}, clear=False):
+                self.assertEqual(default_skill_root(), Path(state_dir).resolve() / "skills")
+                self.assertEqual(default_pending_skill_root(), Path(state_dir).resolve() / "pending" / "skills")
+
+    def test_legacy_pending_can_be_approved_into_default_skill_root(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as legacy_skills, tempfile.TemporaryDirectory() as legacy_pending:
+            legacy_store = SkillStore(skills_dir=legacy_skills, pending_dir=legacy_pending)
+            change = legacy_store.stage_skill_change(
+                skill_name="python-testing",
+                content=SKILL_MD,
+                reason="Legacy pending proposal.",
+            )
+
+            with patch.dict(os.environ, {"CODE_AGENT_HOME": state_dir}, clear=False), patch(
+                "code_agent.services.skills.legacy_pending_skill_root",
+                return_value=Path(legacy_pending).resolve(),
+            ):
+                store = SkillStore()
+                self.assertIn(change.id, format_pending_summary(store.list_pending()))
+                approved = store.approve_pending(change.id)
+
+                self.assertEqual(approved.id, change.id)
+                self.assertTrue((Path(state_dir) / "skills" / "python-testing" / "SKILL.md").is_file())
+                self.assertFalse((Path(legacy_pending) / f"{change.id}.json").exists())
+
     def test_skill_tools_use_global_store(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir, tempfile.TemporaryDirectory() as skills_dir, tempfile.TemporaryDirectory() as pending_dir:
             skill_path = Path(skills_dir) / "python-testing" / "SKILL.md"
@@ -76,61 +109,28 @@ class SkillTests(unittest.TestCase):
             self.assertIn("python-testing", list_tool.invoke({}))
             self.assertIn("Python Testing", view_tool.invoke({"name": "python-testing"}))
 
-    def test_skill_review_threshold_counts_tool_results(self) -> None:
-        messages = [
-            ToolMessage(content="ok", tool_call_id=f"call_{index}")
-            for index in range(4)
-        ]
-
-        self.assertEqual(count_tool_results(messages), 4)
-        self.assertTrue(should_review_skills(messages, reviewed_tool_count=0))
-        self.assertFalse(should_review_skills(messages, reviewed_tool_count=3, threshold=4))
-
-    def test_skill_review_triggers_on_write_tool_call(self) -> None:
-        messages = [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "patch_file",
-                        "args": {"path": "src/app.py", "old": "a", "new": "b"},
-                        "id": "call_1",
-                    }
-                ],
-            )
-        ]
-
-        self.assertTrue(should_review_skills(messages, reviewed_tool_count=0, threshold=5))
-
-    def test_skill_review_triggers_on_write_tool_result(self) -> None:
-        messages = [
-            ToolMessage(
-                content="Patched src/app.py.",
-                name="patch_file",
-                tool_call_id="call_1",
-            )
-        ]
-
-        self.assertTrue(should_review_skills(messages, reviewed_tool_count=0, threshold=5))
-
-    def test_skill_review_recovers_when_reviewed_count_exceeds_current_messages(self) -> None:
-        messages = [
-            ToolMessage(
-                content="Created package.json.",
-                name="create_file",
-                tool_call_id="call_1",
-            )
-        ]
-
-        self.assertEqual(
-            skill_review_trigger_reason(messages, reviewed_tool_count=10, threshold=5),
-            "Recent write tool result detected.",
-        )
-
     def test_skill_review_normalizes_missing_skill_newline(self) -> None:
         content = "---\nname: demo\ndescription: demo skill\n---\n\n# Demo"
 
         self.assertTrue(_normalize_skill_markdown(content).endswith("\n"))
+
+    def test_skill_review_normalizes_target_skill_filename(self) -> None:
+        self.assertEqual(_target_skill_name("frontend-viteconfig.md"), "frontend-viteconfig")
+        self.assertEqual(_target_skill_name("skills/Frontend ViteConfig.md"), "frontend-viteconfig")
+
+    def test_skill_review_rewrites_invalid_frontmatter_name(self) -> None:
+        content = (
+            "---\n"
+            "name: Frontend ViteConfig.md\n"
+            "description: Vite config workflow.\n"
+            "---\n\n"
+            "# Frontend ViteConfig\n"
+        )
+
+        normalized = _normalize_skill_markdown(content, skill_name="frontend-viteconfig")
+
+        self.assertIn("name: frontend-viteconfig\n", normalized)
+        self.assertNotIn("Frontend ViteConfig.md", normalized)
 
 
 if __name__ == "__main__":
