@@ -47,7 +47,6 @@ class Session:
     tool_loops: int = 0
     context_compressions: int = 0
     last_context_tokens: int = 0
-    skill_reviewed_tool_count: int = 0
     model_usage: TokenUsage = field(default_factory=TokenUsage)
 
     def reset(self) -> None:
@@ -56,7 +55,6 @@ class Session:
         self.tool_loops = 0
         self.context_compressions = 0
         self.last_context_tokens = 0
-        self.skill_reviewed_tool_count = 0
         self.model_usage = TokenUsage()
 
 
@@ -71,6 +69,7 @@ def _initial_state(session: Session, user_input: str) -> dict:
     return {
         "messages": [HumanMessage(content=user_input)],
         "workspace": session.workspace,
+        "thread_id": session.thread_id,
         "user_goal": user_input,
         "changed_files": [],
         "did_write": False,
@@ -275,7 +274,6 @@ def _handle_resume_command(session: Session, arg: str) -> None:
     session.tool_loops = 0
     session.context_compressions = 0
     session.last_context_tokens = 0
-    session.skill_reviewed_tool_count = 0
     session.model_usage = TokenUsage()
     console.print(f"[dim]Resumed thread: {session.thread_id}[/dim]")
 
@@ -438,9 +436,22 @@ def _run_interactive_session(
             session.interactions += 1
             config = {"configurable": {"thread_id": session.thread_id}}
             console.print("[dim]Agent started[/dim]")
+            from code_agent.services.trace import TurnTraceRecorder
+
+            trace_recorder = TurnTraceRecorder(
+                workspace=session.workspace,
+                thread_id=session.thread_id,
+                user_request=user_input,
+            )
 
             try:
-                final_answer = _run_graph_stream(graph, _initial_state(session, user_input), config, session)
+                final_answer = _run_graph_stream(
+                    graph,
+                    _initial_state(session, user_input),
+                    config,
+                    session,
+                    trace_recorder=trace_recorder,
+                )
                 while final_answer is None:
                     state = graph.get_state(config)
                     interrupts = state.interrupts
@@ -453,9 +464,21 @@ def _run_interactive_session(
                         console.print("[dim]Executing approved action(s).[/dim]")
                     from langgraph.types import Command
 
-                    final_answer = _run_graph_stream(graph, Command(resume={"decisions": decisions}), config, session)
+                    final_answer = _run_graph_stream(
+                        graph,
+                        Command(resume={"decisions": decisions}),
+                        config,
+                        session,
+                        trace_recorder=trace_recorder,
+                    )
             except Exception as exc:
                 console.print(f"[red]Agent error:[/red] {exc}")
+                _save_turn_trace(
+                    session,
+                    trace_recorder,
+                    final_answer="",
+                    user_feedback=f"Agent error: {exc}",
+                )
                 continue
 
             state = graph.get_state(config)
@@ -465,17 +488,27 @@ def _run_interactive_session(
             answer = final_answer or state.values.get("final_answer") or state.values["messages"][-1].content
             console.print("\n[bold green]Agent[/bold green]")
             _print_raw(str(answer))
-            _maybe_review_skills(session, state.values)
+            trace_payload = _save_turn_trace(session, trace_recorder, final_answer=str(answer))
+            _review_trace_for_skills(session, trace_payload)
             _print_usage(session)
 
 
-def _run_graph_stream(graph, graph_input, config: dict, session: Session | None = None) -> str | None:
+def _run_graph_stream(
+    graph,
+    graph_input,
+    config: dict,
+    session: Session | None = None,
+    *,
+    trace_recorder=None,
+) -> str | None:
     from code_agent.ui.stream import final_answer_from_chunk, interrupt_from_chunk, render_stream_chunk
 
     final_answer = None
     for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
         if session is not None:
             _update_usage_from_chunk(session, chunk)
+        if trace_recorder is not None:
+            trace_recorder.record_chunk(chunk)
         render_stream_chunk(chunk)
         interrupt_value = interrupt_from_chunk(chunk)
         if interrupt_value is not None:
@@ -512,38 +545,58 @@ def _print_usage(session: Session) -> None:
     )
 
 
-def _maybe_review_skills(session: Session, state_values: Mapping[str, Any]) -> None:
-    from langchain_core.messages import BaseMessage
-    from code_agent.services.skill_review import (
-        count_tool_results,
-        review_turn_for_skills,
-        should_review_skills,
+def _save_turn_trace(
+    session: Session,
+    trace_recorder,
+    *,
+    final_answer: str,
+    user_feedback: str = "",
+) -> Mapping[str, Any]:
+    from code_agent.services.trace import write_turn_trace
+
+    existing_skills = SkillStore().list_skills()
+    trace_payload = trace_recorder.build_trace(
+        final_answer=final_answer,
+        existing_skills=existing_skills,
+        user_feedback=user_feedback,
     )
+    path = write_turn_trace(session.workspace, trace_payload)
+    try:
+        rel_path = Path(path).resolve().relative_to(Path(session.workspace).resolve()).as_posix()
+    except ValueError:
+        rel_path = str(path)
+    console.print(f"[dim]Trace saved: {rel_path}[/dim]")
+    return trace_payload
 
-    messages = [
-        message
-        for message in state_values.get("messages", [])
-        if isinstance(message, BaseMessage)
-    ]
-    if not should_review_skills(
-        messages,
-        reviewed_tool_count=session.skill_reviewed_tool_count,
-    ):
-        return
 
-    console.print("[dim]Reviewing recent work for reusable skill updates...[/dim]")
-    result = review_turn_for_skills(
-        messages=messages,
+def _review_trace_for_skills(session: Session, trace_payload: Mapping[str, Any]) -> None:
+    from code_agent.services.skill_review import review_trace_for_skills
+
+    result = review_trace_for_skills(
+        trace=trace_payload,
         config=AgentConfig(model=session.model),
-        thread_id=session.thread_id,
-        project_folder_name=Path(session.workspace).name,
-        reviewed_tool_count=session.skill_reviewed_tool_count,
     )
-    session.skill_reviewed_tool_count = count_tool_results(messages)
-    if result.status == "staged":
-        console.print(f"[dim]{result.message} Use /skills diff {result.pending_id} to inspect.[/dim]")
-    elif result.status == "error":
-        console.print(f"[dim]{result.message}[/dim]")
+    _print_skill_review_result(
+        {
+            "skill_review_status": result.status,
+            "skill_review_message": result.message,
+            "skill_review_pending_id": result.pending_id,
+        }
+    )
+
+
+def _print_skill_review_result(state_values: Mapping[str, Any]) -> None:
+    status = str(state_values.get("skill_review_status") or "")
+    if status == "staged":
+        pending_id = state_values.get("skill_review_pending_id")
+        console.print(
+            f"[dim]{state_values.get('skill_review_message')} "
+            f"Use /skills diff {pending_id} to inspect.[/dim]"
+        )
+    elif status == "none":
+        console.print(f"[dim]Skill review ran: {state_values.get('skill_review_message')}[/dim]")
+    elif status == "error":
+        console.print(f"[dim]{state_values.get('skill_review_message')}[/dim]")
 
 
 if __name__ == "__main__":

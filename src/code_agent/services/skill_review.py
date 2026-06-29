@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 
 from langchain.chat_models import init_chat_model
@@ -11,10 +12,12 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from code_agent.config import AgentConfig
 from code_agent.services.skills import SkillStore, format_skill_index, normalize_skill_name
 from code_agent.services.summarizer import truncate
+from code_agent.services.trace import should_review_trace
 
 
-DEFAULT_REVIEW_TOOL_THRESHOLD = 5
+DEFAULT_REVIEW_TOOL_THRESHOLD = 4
 WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
+WRITE_RESULT_PREFIXES = ("Patched ", "Created ", "Wrote ", "Deleted ")
 
 
 @dataclass(frozen=True)
@@ -25,7 +28,7 @@ class SkillReviewResult:
 
 
 def count_tool_results(messages: list[BaseMessage]) -> int:
-    return sum(isinstance(message, ToolMessage) for message in messages)
+    return sum(_message_type(message) == "tool" for message in messages)
 
 
 def should_review_skills(
@@ -34,10 +37,34 @@ def should_review_skills(
     reviewed_tool_count: int,
     threshold: int = DEFAULT_REVIEW_TOOL_THRESHOLD,
 ) -> bool:
+    return skill_review_trigger_reason(
+        messages,
+        reviewed_tool_count=reviewed_tool_count,
+        threshold=threshold,
+    ) is not None
+
+
+def skill_review_trigger_reason(
+    messages: list[BaseMessage],
+    *,
+    reviewed_tool_count: int,
+    threshold: int = DEFAULT_REVIEW_TOOL_THRESHOLD,
+) -> str | None:
     current_tool_count = count_tool_results(messages)
-    if current_tool_count - reviewed_tool_count >= threshold:
-        return True
-    return _has_write_tool_call(_messages_after_tool_count(messages, reviewed_tool_count))
+    effective_reviewed_tool_count = _effective_reviewed_tool_count(
+        reviewed_tool_count,
+        current_tool_count=current_tool_count,
+    )
+    new_tool_count = current_tool_count - effective_reviewed_tool_count
+    if new_tool_count >= threshold:
+        return f"{new_tool_count} new tool results reached threshold {threshold}."
+
+    recent_messages = _messages_after_tool_count(messages, effective_reviewed_tool_count)
+    if _has_write_tool_call(recent_messages):
+        return "Recent write tool call detected."
+    if _has_write_tool_result(recent_messages):
+        return "Recent write tool result detected."
+    return None
 
 
 def review_turn_for_skills(
@@ -99,6 +126,72 @@ def review_turn_for_skills(
         return SkillReviewResult(status="error", message=f"Skill review failed: {exc}")
 
 
+def review_trace_for_skills(
+    *,
+    trace: Mapping[str, Any],
+    config: AgentConfig,
+) -> SkillReviewResult:
+    if not should_review_trace(trace):
+        return SkillReviewResult(status="skipped", message="Skill review threshold not reached.")
+
+    store = SkillStore()
+    prompt = _build_trace_review_prompt(
+        trace=trace,
+        skill_index=format_skill_index(store.list_skills()),
+    )
+
+    llm_kwargs: dict[str, Any] = {"temperature": 0}
+    if config.api_key:
+        llm_kwargs["api_key"] = config.api_key
+    llm = init_chat_model(config.model, model_provider="deepseek", **llm_kwargs)
+
+    try:
+        response = llm.invoke(
+            [
+                SystemMessage(content=_TRACE_REVIEW_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ]
+        )
+        data = _parse_json_object(str(response.content))
+        if not _bool_from_decision(data):
+            return SkillReviewResult(status="none", message=str(data.get("reason") or "No reusable skill update."))
+
+        target_skill = _target_skill_name(str(data.get("target_skill") or data.get("skill_name") or "learned-skill"))
+        content = str(data.get("proposed_content") or data.get("content") or "")
+        reason = str(data.get("reason") or "Trace review proposed a reusable skill update.")
+        operation = _operation_from_decision(data)
+        confidence = _confidence_from_decision(data)
+        change = store.stage_skill_change(
+            skill_name=target_skill,
+            content=content,
+            reason=f"{reason} Confidence: {confidence:.2f}.",
+            action=operation,
+            source={
+                "kind": "turn_trace",
+                "trace_path": str(trace.get("trace_path") or ""),
+                "turn_id": str(trace.get("turn_id") or ""),
+                "thread_id": str(trace.get("thread_id") or ""),
+                "skill_type": str(data.get("skill_type") or "global"),
+                "confidence": confidence,
+                "decision": {
+                    "should_create_skill": True,
+                    "reason": reason,
+                    "skill_type": str(data.get("skill_type") or "global"),
+                    "target_skill": target_skill,
+                    "operation": operation,
+                    "confidence": confidence,
+                },
+            },
+        )
+        return SkillReviewResult(
+            status="staged",
+            message=f"Staged pending skill change {change.id} for {change.skill_name}.",
+            pending_id=change.id,
+        )
+    except Exception as exc:
+        return SkillReviewResult(status="error", message=f"Skill review failed: {exc}")
+
+
 def _build_review_prompt(
     *,
     messages: list[BaseMessage],
@@ -122,6 +215,25 @@ Recent transcript:
 """.strip()
 
 
+def _build_trace_review_prompt(
+    *,
+    trace: Mapping[str, Any],
+    skill_index: str,
+) -> str:
+    trace_json = json.dumps(trace, indent=2, ensure_ascii=False)
+    return f"""
+Available global skills:
+{skill_index}
+
+Review this structured turn trace. It is the source of truth for the user's goal,
+tool calls, tool results, file changes, errors, validation, feedback, and final answer.
+Do not infer tool execution from compressed conversation memory.
+
+Turn trace:
+{truncate(trace_json, 18_000)}
+""".strip()
+
+
 def _format_messages_for_review(
     messages: list[BaseMessage],
     *,
@@ -131,10 +243,15 @@ def _format_messages_for_review(
     seen_tool_results = 0
     include = reviewed_tool_count <= 0
 
+    effective_reviewed_tool_count = _effective_reviewed_tool_count(
+        reviewed_tool_count,
+        current_tool_count=count_tool_results(messages),
+    )
+
     for message in messages:
-        if isinstance(message, ToolMessage):
+        if _message_type(message) == "tool":
             seen_tool_results += 1
-            if seen_tool_results > reviewed_tool_count:
+            if seen_tool_results > effective_reviewed_tool_count:
                 include = True
         if not include:
             continue
@@ -151,14 +268,14 @@ def _format_message(message: BaseMessage) -> str:
     elif isinstance(message, ToolMessage):
         role = "tool"
     else:
-        role = message.type
+        role = _message_type(message)
 
-    content = str(message.content or "")
-    if isinstance(message, AIMessage):
-        tool_calls = getattr(message, "tool_calls", None) or []
+    content = str(_message_content(message) or "")
+    if role == "agent" or _message_type(message) == "ai":
+        tool_calls = _message_tool_calls(message)
         if tool_calls:
             calls = [
-                f"{call.get('name', 'tool')}({json.dumps(call.get('args') or {}, ensure_ascii=False)})"
+                f"{_tool_call_name(call)}({json.dumps(_tool_call_args(call), ensure_ascii=False)})"
                 for call in tool_calls
             ]
             content = "\n".join(calls)
@@ -168,11 +285,23 @@ def _format_message(message: BaseMessage) -> str:
 
 def _has_write_tool_call(messages: list[BaseMessage]) -> bool:
     for message in messages:
-        if not isinstance(message, AIMessage):
+        if _message_type(message) != "ai":
             continue
-        for tool_call in getattr(message, "tool_calls", None) or []:
-            if tool_call.get("name") in WRITE_TOOL_NAMES:
+        for tool_call in _message_tool_calls(message):
+            if _tool_call_name(tool_call) in WRITE_TOOL_NAMES:
                 return True
+    return False
+
+
+def _has_write_tool_result(messages: list[BaseMessage]) -> bool:
+    for message in messages:
+        if _message_type(message) != "tool":
+            continue
+        if _tool_message_name(message) in WRITE_TOOL_NAMES:
+            return True
+        content = str(_message_content(message) or "")
+        if content.startswith(WRITE_RESULT_PREFIXES):
+            return True
     return False
 
 
@@ -185,11 +314,55 @@ def _messages_after_tool_count(
 
     seen_tool_results = 0
     for index, message in enumerate(messages):
-        if isinstance(message, ToolMessage):
+        if _message_type(message) == "tool":
             seen_tool_results += 1
             if seen_tool_results >= reviewed_tool_count:
                 return messages[index + 1 :]
     return []
+
+
+def _effective_reviewed_tool_count(reviewed_tool_count: int, *, current_tool_count: int) -> int:
+    if reviewed_tool_count > current_tool_count:
+        return 0
+    return max(0, reviewed_tool_count)
+
+
+def _message_type(message: BaseMessage) -> str:
+    if isinstance(message, dict):
+        return str(message.get("type") or message.get("role") or "")
+    return str(getattr(message, "type", ""))
+
+
+def _message_content(message: BaseMessage) -> Any:
+    if isinstance(message, dict):
+        return message.get("content")
+    return getattr(message, "content", None)
+
+
+def _message_tool_calls(message: BaseMessage) -> list[Any]:
+    if isinstance(message, dict):
+        tool_calls = message.get("tool_calls") or []
+    else:
+        tool_calls = getattr(message, "tool_calls", None) or []
+    return list(tool_calls) if isinstance(tool_calls, list) else []
+
+
+def _tool_message_name(message: BaseMessage) -> str:
+    if isinstance(message, dict):
+        return str(message.get("name") or "")
+    return str(getattr(message, "name", "") or "")
+
+
+def _tool_call_name(tool_call: Any) -> str:
+    if isinstance(tool_call, dict):
+        return str(tool_call.get("name") or "")
+    return str(getattr(tool_call, "name", "") or "")
+
+
+def _tool_call_args(tool_call: Any) -> Any:
+    if isinstance(tool_call, dict):
+        return tool_call.get("args") or {}
+    return getattr(tool_call, "args", {}) or {}
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -209,6 +382,38 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Skill review response must be a JSON object.")
     return data
+
+
+def _bool_from_decision(data: Mapping[str, Any]) -> bool:
+    value = data.get("should_create_skill")
+    if isinstance(value, bool):
+        return value
+    decision = str(data.get("decision") or "").lower()
+    return decision == "stage"
+
+
+def _target_skill_name(value: str) -> str:
+    name = value.replace("\\", "/").rsplit("/", 1)[-1]
+    if name.lower().endswith(".md"):
+        name = name[:-3]
+    if name.lower() == "skill":
+        name = "learned-skill"
+    return normalize_skill_name(name)
+
+
+def _operation_from_decision(data: Mapping[str, Any]) -> str:
+    operation = str(data.get("operation") or "").lower()
+    if operation in {"create", "update"}:
+        return operation
+    return ""
+
+
+def _confidence_from_decision(data: Mapping[str, Any]) -> float:
+    try:
+        confidence = float(data.get("confidence", 0))
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(confidence, 1.0))
 
 
 _REVIEW_SYSTEM_PROMPT = """
@@ -236,4 +441,32 @@ For a proposed change:
 
 The content must be a complete SKILL.md file. The YAML frontmatter must contain only
 name and description. Keep the skill concise, procedural, and free of project secrets.
+""".strip()
+
+
+_TRACE_REVIEW_SYSTEM_PROMPT = """
+You are a background skill reviewer for a coding agent.
+
+Read the structured turn trace and decide whether it reveals reusable procedural
+knowledge that should become a skill. Prefer durable workflows, repeated recovery
+patterns, user corrections, workspace conventions that future runs should obey, and
+non-obvious tool sequences. Do not create skills for one-off facts, secrets, private
+data, or generic coding advice.
+
+Respond with only one JSON object matching this schema:
+{
+  "should_create_skill": false,
+  "reason": "why no reusable skill is needed",
+  "skill_type": "global",
+  "target_skill": "",
+  "operation": "create",
+  "proposed_content": "",
+  "confidence": 0.0
+}
+
+When a skill is useful, set should_create_skill to true. skill_type must be "global" or
+"project". operation must be "create" or "update". target_skill must be a concise
+lowercase filename-like name, for example "frontend-style-editing.md". proposed_content
+must be a complete SKILL.md file with YAML frontmatter containing only name and
+description. Keep proposed_content concise, procedural, and free of secrets.
 """.strip()

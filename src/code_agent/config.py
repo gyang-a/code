@@ -26,6 +26,8 @@ DEFAULT_EXCLUDE_GLOBS = (
     "__pycache__/**",
     ".code-agent/checkpoints.sqlite3",
     ".code-agent/checkpoints.sqlite3-*",
+    ".code-agent/traces/**",
+    ".code-agent/.gitignore",
 )
 
 SENSITIVE_FILE_NAMES = {

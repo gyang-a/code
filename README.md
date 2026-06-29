@@ -70,8 +70,10 @@ Each turn injects a compact global skill index into runtime metadata. The model 
 `skills_list` and `skill_view` to load a relevant skill on demand.
 
 After sufficiently tool-heavy work, or after write tools are used, a background reviewer
-checks whether durable procedural knowledge should be saved. It stages proposed skill
-changes for review instead of writing them directly. Use:
+checks whether durable procedural knowledge should be saved. The reviewer reads the
+structured turn trace, not compressed conversation state, so tool calls, results, file
+changes, errors, validation, final answer, and existing skills remain auditable. It stages
+proposed skill changes for review instead of writing them directly. Use:
 
 ```text
 /skills list
@@ -81,6 +83,18 @@ changes for review instead of writing them directly. Use:
 /skills approve <id>
 /skills reject <id>
 ```
+
+## Turn Traces
+
+Each agent turn writes an audit record under the selected workspace:
+
+```text
+.code-agent/traces/<timestamp>_<turn-id>.json
+```
+
+The trace directory is local state. Code Agent writes `.code-agent/.gitignore` and, when
+the workspace is a Git repository, adds `.code-agent/` to `.git/info/exclude` so traces
+and checkpoints are not tracked by project Git history.
 
 ## Tools
 

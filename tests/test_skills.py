@@ -7,7 +7,11 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from code_agent.services.skill_review import count_tool_results, should_review_skills
+from code_agent.services.skill_review import (
+    count_tool_results,
+    should_review_skills,
+    skill_review_trigger_reason,
+)
 from code_agent.services.skills import SkillStore, format_pending_summary, format_skill_index
 from code_agent.services.workspace import Workspace
 from code_agent.tools import build_skill_view_tool, build_skills_list_tool
@@ -74,12 +78,12 @@ class SkillTests(unittest.TestCase):
     def test_skill_review_threshold_counts_tool_results(self) -> None:
         messages = [
             ToolMessage(content="ok", tool_call_id=f"call_{index}")
-            for index in range(5)
+            for index in range(4)
         ]
 
-        self.assertEqual(count_tool_results(messages), 5)
+        self.assertEqual(count_tool_results(messages), 4)
         self.assertTrue(should_review_skills(messages, reviewed_tool_count=0))
-        self.assertFalse(should_review_skills(messages, reviewed_tool_count=4, threshold=5))
+        self.assertFalse(should_review_skills(messages, reviewed_tool_count=3, threshold=4))
 
     def test_skill_review_triggers_on_write_tool_call(self) -> None:
         messages = [
@@ -96,6 +100,31 @@ class SkillTests(unittest.TestCase):
         ]
 
         self.assertTrue(should_review_skills(messages, reviewed_tool_count=0, threshold=5))
+
+    def test_skill_review_triggers_on_write_tool_result(self) -> None:
+        messages = [
+            ToolMessage(
+                content="Patched src/app.py.",
+                name="patch_file",
+                tool_call_id="call_1",
+            )
+        ]
+
+        self.assertTrue(should_review_skills(messages, reviewed_tool_count=0, threshold=5))
+
+    def test_skill_review_recovers_when_reviewed_count_exceeds_current_messages(self) -> None:
+        messages = [
+            ToolMessage(
+                content="Created package.json.",
+                name="create_file",
+                tool_call_id="call_1",
+            )
+        ]
+
+        self.assertEqual(
+            skill_review_trigger_reason(messages, reviewed_tool_count=10, threshold=5),
+            "Recent write tool result detected.",
+        )
 
 
 if __name__ == "__main__":
