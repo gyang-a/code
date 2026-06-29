@@ -59,6 +59,29 @@ class TraceTests(unittest.TestCase):
                 [{"path": "src/app.py", "operation": "write", "call_id": "call_1"}],
             )
 
+    def test_turn_trace_snapshots_dirty_file_before_agent_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "src" / "app.py"
+            path.parent.mkdir(parents=True)
+            path.write_text("user version\n", encoding="utf-8")
+            recorder = TurnTraceRecorder(
+                workspace=tmp,
+                thread_id="thread_1",
+                user_request="update dirty app file",
+                git_baseline_dirty_paths=["src/app.py"],
+                turn_id="turn_001",
+            )
+
+            recorder.capture_write_snapshot("write_file", "src/app.py")
+            path.write_text("agent version\n", encoding="utf-8")
+            trace = recorder.build_trace(final_answer="done", existing_skills=[])
+
+            self.assertEqual(len(trace["undo_snapshots"]), 1)
+            snapshot = trace["undo_snapshots"][0]
+            self.assertEqual(snapshot["path"], "src/app.py")
+            snapshot_path = Path(tmp) / snapshot["snapshot_path"]
+            self.assertEqual(snapshot_path.read_text(encoding="utf-8"), "user version\n")
+
     def test_turn_trace_records_interrupt_action_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             recorder = TurnTraceRecorder(

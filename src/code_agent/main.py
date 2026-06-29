@@ -108,6 +108,30 @@ def _run_git_status_porcelain(workspace: str) -> str:
     return truncate(output)
 
 
+def _run_git_dirty_paths(workspace: str) -> list[str]:
+    result = _run_git_command(workspace, ["status", "--porcelain=v1", "-z", "--", "."])
+    if result.returncode != 0:
+        return []
+    return _parse_git_status_paths_z(result.stdout)
+
+
+def _parse_git_status_paths_z(output: str) -> list[str]:
+    records = [record for record in output.split("\0") if record]
+    paths: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        status = record[:2]
+        path = record[3:] if len(record) > 3 else ""
+        if path:
+            paths.append(_normalize_git_path(path))
+        if "R" in status or "C" in status:
+            index += 2
+        else:
+            index += 1
+    return _unique_preserving_order(paths)
+
+
 def _parse_undo_args(raw_arg: str) -> tuple[bool, list[str]]:
     include_untracked = False
     targets: list[str] = []
@@ -121,27 +145,256 @@ def _parse_undo_args(raw_arg: str) -> tuple[bool, list[str]]:
 
 
 def _run_git_undo(workspace: str, raw_arg: str) -> str:
-    include_untracked, targets = _parse_undo_args(raw_arg)
-    restore = _run_git_command(workspace, ["restore", "--staged", "--worktree", "--", *targets], timeout=20)
-    outputs = [restore.stdout if restore.returncode == 0 else restore.stdout + restore.stderr]
-    if restore.returncode != 0:
-        return truncate("".join(outputs))
+    _include_untracked, targets = _parse_undo_args(raw_arg)
+    undo_plan = _build_agent_undo_plan(workspace, targets)
+    if undo_plan["error"]:
+        return str(undo_plan["error"])
 
-    if include_untracked:
-        clean = _run_git_command(workspace, ["clean", "-fd", "--", *targets], timeout=20)
+    restore_paths = list(undo_plan["restore_paths"])
+    clean_paths = list(undo_plan["clean_paths"])
+    snapshot_restores = list(undo_plan["snapshot_restores"])
+    snapshot_deletes = list(undo_plan["snapshot_deletes"])
+    skipped = list(undo_plan["skipped"])
+    outputs: list[str] = []
+
+    for snapshot in snapshot_restores:
+        try:
+            _restore_undo_snapshot(workspace, snapshot)
+        except Exception as exc:
+            return f"ERROR: Failed to restore undo snapshot for {snapshot.get('path')}: {exc}"
+
+    for path in snapshot_deletes:
+        try:
+            _delete_workspace_file(workspace, str(path))
+        except Exception as exc:
+            return f"ERROR: Failed to restore deleted baseline state for {path}: {exc}"
+
+    if restore_paths:
+        restore = _run_git_command(workspace, ["restore", "--staged", "--worktree", "--", *restore_paths], timeout=20)
+        outputs.append(restore.stdout if restore.returncode == 0 else restore.stdout + restore.stderr)
+        if restore.returncode != 0:
+            return truncate("".join(outputs))
+
+    if clean_paths:
+        clean = _run_git_command(workspace, ["clean", "-fd", "--", *clean_paths], timeout=20)
         outputs.append(clean.stdout if clean.returncode == 0 else clean.stdout + clean.stderr)
         if clean.returncode != 0:
             return truncate("".join(outputs))
 
+    if restore_paths or clean_paths or snapshot_restores or snapshot_deletes:
+        outputs.append("Restored agent changes.")
+        if snapshot_restores:
+            outputs.append(
+                "\nRestored pre-agent dirty snapshots:\n"
+                + "\n".join(f"- {snapshot.get('path')}" for snapshot in snapshot_restores)
+            )
+        if snapshot_deletes:
+            outputs.append(
+                "\nRestored pre-agent deleted paths:\n"
+                + "\n".join(f"- {path}" for path in snapshot_deletes)
+            )
+        if restore_paths:
+            outputs.append("\nRestored tracked paths:\n" + "\n".join(f"- {path}" for path in restore_paths))
+        if clean_paths:
+            outputs.append("\nRemoved agent-created untracked paths:\n" + "\n".join(f"- {path}" for path in clean_paths))
+    else:
+        outputs.append("No safe agent changes to restore.")
+
+    if skipped:
+        outputs.append("\nSkipped paths:\n" + "\n".join(f"- {item}" for item in skipped))
+
     remaining = _run_git_status_porcelain(workspace)
     if remaining:
-        outputs.append("\nRestored tracked changes. Remaining changes:\n")
+        outputs.append("\nRemaining changes:\n")
         outputs.append(remaining)
-        if not include_untracked:
-            outputs.append("\nTip: use /undo --include-untracked to remove untracked files.\n")
-    else:
-        outputs.append("Restored workspace changes.")
     return truncate("".join(outputs))
+
+
+def _build_agent_undo_plan(workspace: str, targets: list[str]) -> dict[str, Any]:
+    from code_agent.services.trace import load_project_trace
+
+    trace = load_project_trace(workspace)
+    turns = trace.get("turns")
+    if not isinstance(turns, list) or not turns:
+        return {
+            "error": "No agent trace found. Refusing to run broad workspace undo.",
+            "restore_paths": [],
+            "clean_paths": [],
+            "snapshot_restores": [],
+            "snapshot_deletes": [],
+            "skipped": [],
+        }
+
+    latest_turn = turns[-1]
+    if not isinstance(latest_turn, Mapping):
+        return {
+            "error": "Latest agent trace is invalid. Refusing to run broad workspace undo.",
+            "restore_paths": [],
+            "clean_paths": [],
+            "snapshot_restores": [],
+            "snapshot_deletes": [],
+            "skipped": [],
+        }
+
+    baseline = latest_turn.get("git_baseline")
+    if not isinstance(baseline, Mapping) or not isinstance(baseline.get("dirty_paths"), list):
+        return {
+            "error": "Latest agent trace has no git baseline. Refusing to risk user changes.",
+            "restore_paths": [],
+            "clean_paths": [],
+            "snapshot_restores": [],
+            "snapshot_deletes": [],
+            "skipped": [],
+        }
+
+    workspace_obj = Workspace(workspace)
+    target_paths = _normalize_undo_targets(workspace_obj, targets)
+    baseline_dirty = {
+        _normalize_git_path(str(path))
+        for path in baseline.get("dirty_paths", [])
+        if str(path)
+    }
+
+    restore_paths: list[str] = []
+    clean_paths: list[str] = []
+    snapshot_restores: list[dict[str, Any]] = []
+    snapshot_deletes: list[str] = []
+    skipped: list[str] = []
+    snapshots = _undo_snapshots_by_path(latest_turn)
+    for change in _latest_turn_file_changes(latest_turn):
+        path = _normalize_workspace_path(workspace_obj, str(change.get("path") or ""))
+        if not path:
+            continue
+        if not _path_matches_targets(path, target_paths):
+            continue
+        if path in baseline_dirty:
+            snapshot = snapshots.get(path)
+            if snapshot is None:
+                skipped.append(f"{path} was already modified before this agent turn and has no undo snapshot")
+                continue
+            if snapshot.get("existed") is False:
+                snapshot_deletes.append(path)
+            else:
+                snapshot_restores.append(snapshot)
+            continue
+
+        operation = str(change.get("operation") or "")
+        if operation == "create":
+            clean_paths.append(path)
+        else:
+            restore_paths.append(path)
+
+    return {
+        "error": "",
+        "restore_paths": _unique_preserving_order(restore_paths),
+        "clean_paths": _unique_preserving_order(clean_paths),
+        "snapshot_restores": _unique_snapshot_restores(snapshot_restores),
+        "snapshot_deletes": _unique_preserving_order(snapshot_deletes),
+        "skipped": _unique_preserving_order(skipped),
+    }
+
+
+def _restore_undo_snapshot(workspace: str, snapshot: Mapping[str, Any]) -> None:
+    workspace_obj = Workspace(workspace)
+    target_rel = _normalize_workspace_path(workspace_obj, str(snapshot.get("path") or ""))
+    snapshot_rel = _normalize_workspace_path(workspace_obj, str(snapshot.get("snapshot_path") or ""))
+    if not target_rel or not snapshot_rel:
+        raise WorkspaceError("Invalid undo snapshot path.")
+
+    snapshot_path = workspace_obj.resolve(snapshot_rel)
+    snapshot_path.relative_to(_undo_root_for_workspace(workspace_obj))
+    if not snapshot_path.is_file():
+        raise WorkspaceError(f"Undo snapshot not found: {snapshot_rel}")
+
+    target_path = workspace_obj.resolve(target_rel)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(snapshot_path.read_bytes())
+
+
+def _delete_workspace_file(workspace: str, path: str) -> None:
+    workspace_obj = Workspace(workspace)
+    target_rel = _normalize_workspace_path(workspace_obj, path)
+    if not target_rel:
+        raise WorkspaceError("Invalid undo target path.")
+    target_path = workspace_obj.resolve(target_rel)
+    if target_path.exists():
+        if not target_path.is_file():
+            raise WorkspaceError(f"Refusing to delete non-file undo target: {target_rel}")
+        target_path.unlink()
+
+
+def _undo_root_for_workspace(workspace: Workspace) -> Path:
+    from code_agent.services.trace import undo_root
+
+    return undo_root(workspace.root).resolve()
+
+
+def _undo_snapshots_by_path(turn: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    snapshots = turn.get("undo_snapshots")
+    if not isinstance(snapshots, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, Mapping):
+            continue
+        path = _normalize_git_path(str(snapshot.get("path") or ""))
+        if path and path not in result:
+            result[path] = dict(snapshot)
+    return result
+
+
+def _unique_snapshot_restores(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for item in items:
+        path = _normalize_git_path(str(item.get("path") or ""))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        unique.append(item)
+    return unique
+
+
+def _latest_turn_file_changes(turn: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    changes = turn.get("file_changes")
+    if not isinstance(changes, list):
+        return []
+    return [change for change in changes if isinstance(change, Mapping)]
+
+
+def _normalize_undo_targets(workspace: Workspace, targets: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for target in targets or ["."]:
+        normalized.append(_normalize_workspace_path(workspace, target) or ".")
+    return _unique_preserving_order(normalized) or ["."]
+
+
+def _normalize_workspace_path(workspace: Workspace, path: str) -> str:
+    try:
+        return _normalize_git_path(workspace.relative(workspace.resolve(path)))
+    except WorkspaceError:
+        return ""
+
+
+def _path_matches_targets(path: str, targets: list[str]) -> bool:
+    if "." in targets:
+        return True
+    return any(path == target or path.startswith(f"{target.rstrip('/')}/") for target in targets)
+
+
+def _normalize_git_path(path: str) -> str:
+    return path.replace("\\", "/").strip().strip("/")
+
+
+def _unique_preserving_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
 
 
 def _print_raw(text: str) -> None:
@@ -200,11 +453,13 @@ def _handle_slash(command: str, session: Session) -> bool:
         if not status:
             _print_raw("No workspace changes to restore.")
             return True
-        include_untracked, targets = _parse_undo_args(arg)
+        _include_untracked, targets = _parse_undo_args(arg)
         scope = " ".join(targets)
-        action = "restore tracked changes and delete untracked files" if include_untracked else "restore tracked changes"
-        _print_raw(f"{action}: {scope}\n\nCurrent changes:\n{status}")
-        approved = Prompt.ask("Confirm restore?", choices=["y", "n"], default="n")
+        _print_raw(
+            f"Restore latest agent changes only: {scope}\n\n"
+            f"Current changes:\n{status}"
+        )
+        approved = Prompt.ask("Confirm agent-scoped restore?", choices=["y", "n"], default="n")
         if approved == "y":
             _print_raw(_run_git_undo(session.workspace, arg))
         else:
@@ -448,6 +703,8 @@ def _run_interactive_session(
                 workspace=session.workspace,
                 thread_id=session.thread_id,
                 user_request=user_input,
+                git_baseline_status=_run_git_status_porcelain(session.workspace),
+                git_baseline_dirty_paths=_run_git_dirty_paths(session.workspace),
             )
 
             try:
@@ -509,20 +766,26 @@ def _run_graph_stream(
     trace_recorder=None,
 ) -> str | None:
     from code_agent.ui.stream import final_answer_from_chunk, interrupt_from_chunk, render_stream_chunk
+    from code_agent.services.trace import reset_current_trace_recorder, set_current_trace_recorder
 
     final_answer = None
-    for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
-        if session is not None:
-            _update_usage_from_chunk(session, chunk)
-        if trace_recorder is not None:
-            trace_recorder.record_chunk(chunk)
-        render_stream_chunk(chunk)
-        interrupt_value = interrupt_from_chunk(chunk)
-        if interrupt_value is not None:
-            return None
-        chunk_answer = final_answer_from_chunk(chunk)
-        if chunk_answer:
-            final_answer = chunk_answer
+    token = set_current_trace_recorder(trace_recorder) if trace_recorder is not None else None
+    try:
+        for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
+            if session is not None:
+                _update_usage_from_chunk(session, chunk)
+            if trace_recorder is not None:
+                trace_recorder.record_chunk(chunk)
+            render_stream_chunk(chunk)
+            interrupt_value = interrupt_from_chunk(chunk)
+            if interrupt_value is not None:
+                return None
+            chunk_answer = final_answer_from_chunk(chunk)
+            if chunk_answer:
+                final_answer = chunk_answer
+    finally:
+        if token is not None:
+            reset_current_trace_recorder(token)
     return final_answer
 
 

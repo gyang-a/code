@@ -13,7 +13,15 @@ from code_agent.graph import (
     _approval_interrupt_config,
     build_tools,
 )
-from code_agent.main import _format_sessions, _is_slash_command, _parse_undo_args, _print_raw, _resolve_chat_workspace
+from code_agent.main import (
+    _build_agent_undo_plan,
+    _format_sessions,
+    _is_slash_command,
+    _parse_git_status_paths_z,
+    _parse_undo_args,
+    _print_raw,
+    _resolve_chat_workspace,
+)
 from code_agent.services.persistence import SessionRecord
 from code_agent.services.workspace import Workspace
 from code_agent.ui.stream import _should_render_update, _tool_result_summary
@@ -47,6 +55,127 @@ class GraphRoutingTests(unittest.TestCase):
 
         self.assertTrue(include_untracked)
         self.assertEqual(targets, ["src/app.py", "src\\win.py"])
+
+    def test_git_status_z_paths_are_parsed_for_undo_baseline(self) -> None:
+        output = " M src/app.py\0?? src/new file.tsx\0R  src/new-name.py\0src/old-name.py\0"
+
+        self.assertEqual(
+            _parse_git_status_paths_z(output),
+            ["src/app.py", "src/new file.tsx", "src/new-name.py"],
+        )
+
+    def test_agent_undo_plan_skips_dirty_paths_without_snapshot(self) -> None:
+        from code_agent.services.trace import append_turn_trace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            append_turn_trace(
+                tmp,
+                {
+                    "turn_id": "turn_001",
+                    "thread_id": "thread_1",
+                    "user_request": "edit files",
+                    "git_baseline": {
+                        "status": " M src/user.py",
+                        "dirty_paths": ["src/user.py"],
+                    },
+                    "tool_trace": [],
+                    "file_changes": [
+                        {"path": "src/user.py", "operation": "write", "call_id": "call_1"},
+                        {"path": "src/agent.py", "operation": "write", "call_id": "call_2"},
+                        {"path": "src/new.py", "operation": "create", "call_id": "call_3"},
+                    ],
+                    "errors": [],
+                },
+            )
+
+            plan = _build_agent_undo_plan(tmp, ["."])
+
+            self.assertEqual(plan["restore_paths"], ["src/agent.py"])
+            self.assertEqual(plan["clean_paths"], ["src/new.py"])
+            self.assertEqual(plan["snapshot_restores"], [])
+            self.assertEqual(plan["snapshot_deletes"], [])
+            self.assertEqual(
+                plan["skipped"],
+                ["src/user.py was already modified before this agent turn and has no undo snapshot"],
+            )
+
+    def test_agent_undo_plan_restores_dirty_paths_with_snapshot(self) -> None:
+        from code_agent.services.trace import append_turn_trace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / ".code-agent" / "undo" / "turn_001" / "snap.bin"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text("user version\n", encoding="utf-8")
+            append_turn_trace(
+                tmp,
+                {
+                    "turn_id": "turn_001",
+                    "thread_id": "thread_1",
+                    "user_request": "edit dirty file",
+                    "git_baseline": {
+                        "status": " M src/user.py",
+                        "dirty_paths": ["src/user.py", "src/deleted.py"],
+                    },
+                    "undo_snapshots": [
+                        {
+                            "path": "src/user.py",
+                            "snapshot_path": ".code-agent/undo/turn_001/snap.bin",
+                            "existed": True,
+                        },
+                        {
+                            "path": "src/deleted.py",
+                            "snapshot_path": ".code-agent/undo/turn_001/deleted.bin",
+                            "existed": False,
+                        },
+                    ],
+                    "tool_trace": [],
+                    "file_changes": [
+                        {"path": "src/user.py", "operation": "write", "call_id": "call_1"},
+                        {"path": "src/deleted.py", "operation": "create", "call_id": "call_2"},
+                    ],
+                    "errors": [],
+                },
+            )
+
+            plan = _build_agent_undo_plan(tmp, ["."])
+
+            self.assertEqual(plan["restore_paths"], [])
+            self.assertEqual(plan["clean_paths"], [])
+            self.assertEqual(
+                plan["snapshot_restores"],
+                [
+                    {
+                        "path": "src/user.py",
+                        "snapshot_path": ".code-agent/undo/turn_001/snap.bin",
+                        "existed": True,
+                    }
+                ],
+            )
+            self.assertEqual(plan["snapshot_deletes"], ["src/deleted.py"])
+            self.assertEqual(plan["skipped"], [])
+
+    def test_undo_snapshot_restore_writes_pre_agent_dirty_content(self) -> None:
+        from code_agent.main import _restore_undo_snapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            target = workspace / "src" / "user.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("agent version\n", encoding="utf-8")
+            snapshot = workspace / ".code-agent" / "undo" / "turn_001" / "snap.bin"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text("user version\n", encoding="utf-8")
+
+            _restore_undo_snapshot(
+                tmp,
+                {
+                    "path": "src/user.py",
+                    "snapshot_path": ".code-agent/undo/turn_001/snap.bin",
+                    "existed": True,
+                },
+            )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "user version\n")
 
     def test_raw_print_disables_rich_markup_for_diff_content(self) -> None:
         with patch("code_agent.main.console.print") as print_mock:

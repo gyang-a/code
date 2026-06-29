@@ -13,7 +13,7 @@ def build_skills_list_tool(workspace: Workspace):
 
     @tool(args_schema=SkillsListInput)
     def skills_list() -> str:
-        """List available project skills by name and description."""
+        """List available global skills by name and description."""
         return format_skill_index(store.list_skills())
 
     return skills_list
@@ -25,7 +25,7 @@ def build_skill_view_tool(workspace: Workspace):
 
     @tool(args_schema=SkillViewInput)
     def skill_view(name: str) -> str:
-        """Read one project skill's SKILL.md instructions when its description is relevant."""
+        """Read one global skill's SKILL.md instructions when its description is relevant."""
         try:
             return store.read_skill(name)
         except WorkspaceError as exc:

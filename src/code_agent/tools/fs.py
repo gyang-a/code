@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 
 from code_agent.services.patcher import replace_exact_once
 from code_agent.services.summarizer import truncate
+from code_agent.services.trace import capture_current_write_snapshot
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.safety import RiskLevel, classify_tool_call, rejected
 from code_agent.tools.schemas import (
@@ -99,6 +100,14 @@ def _ensure_small_content(content: str) -> str | None:
     return None
 
 
+def _capture_before_write(tool_name: str, path: str) -> str | None:
+    try:
+        capture_current_write_snapshot(tool_name, path)
+    except Exception as exc:
+        return _error(exc)
+    return None
+
+
 def build_read_file_tool(
     workspace: Workspace,
     *,
@@ -183,6 +192,10 @@ def build_patch_file_tool(workspace: Workspace):
             if rejection:
                 return rejection
 
+            snapshot_error = _capture_before_write("patch_file", path)
+            if snapshot_error:
+                return snapshot_error
+
             result = replace_exact_once(workspace, path, old, new)
 
             if result.changed:
@@ -218,6 +231,10 @@ def build_create_file_tool(workspace: Workspace):
             if size_error:
                 return size_error
 
+            snapshot_error = _capture_before_write("create_file", path)
+            if snapshot_error:
+                return snapshot_error
+
             workspace.write_text(path, content, overwrite=False)
             return f"Created {path}{_git_diff_for(workspace, path)}"
 
@@ -239,6 +256,10 @@ def build_write_file_tool(workspace: Workspace):
             size_error = _ensure_small_content(content)
             if size_error:
                 return size_error
+
+            snapshot_error = _capture_before_write("write_file", path)
+            if snapshot_error:
+                return snapshot_error
 
             workspace.write_text(path, content, overwrite=True)
             return f"Wrote {path}{_git_diff_for(workspace, path)}"
@@ -265,6 +286,10 @@ def build_delete_file_tool(workspace: Workspace):
                 return f"ERROR: Not a file: {path}"
             if workspace.is_excluded(file_path) or workspace.is_sensitive(file_path):
                 return f"ERROR: Refusing to delete excluded or sensitive file: {path}"
+
+            snapshot_error = _capture_before_write("delete_file", path)
+            if snapshot_error:
+                return snapshot_error
 
             before = _git_diff_for(workspace, path)
             file_path.unlink()

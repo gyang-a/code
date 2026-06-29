@@ -42,7 +42,7 @@ def print_help() -> None:
         ("/status", "Show current workspace and thread state."),
         ("/tools", "Show tool permission rules."),
         ("/diff", "Show current git diff."),
-        ("/undo [path]", "Restore tracked git changes; add --include-untracked to delete new files."),
+        ("/undo [path]", "Restore only the latest agent turn's safe file changes."),
         ("/doctor", "Check dependencies, environment variables, and workspace status."),
         ("/usage", "Show local interaction and token usage."),
         ("/skills", "List saved skills; legacy pending review commands are available."),

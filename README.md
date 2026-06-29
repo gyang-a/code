@@ -107,6 +107,15 @@ trace so user feedback and corrections across turns are visible. When the projec
 grows, review receives a bounded view: a structured historical summary plus the most
 recent raw turns, rather than the full trace file.
 
+## Undo
+
+`/undo` is scoped to the latest agent turn. Each turn records the Git dirty paths that
+already existed before the agent started, plus the files the agent actually changed.
+When the agent edits a file that was already dirty, Code Agent saves a private before
+snapshot under `.code-agent/undo/<turn-id>/` and restores that snapshot during undo. For
+files that were clean at turn start, undo uses Git restore; for files the agent created,
+undo removes only those paths.
+
 ## Tools
 
 The model can call bounded filesystem, search, git, and skill tools. `read_file` returns a limited text window by default; the agent must request later `start_line` values to continue reading. Command execution is not available to the agent; if validation is useful, the final answer should suggest exact commands for the user to run locally.

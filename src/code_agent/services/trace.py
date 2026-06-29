@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,10 +14,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from code_agent.services.skills import SkillInfo
 from code_agent.services.summarizer import truncate
+from code_agent.services.workspace import Workspace, WorkspaceError
 
 
 STATE_DIR = ".code-agent"
 TRACE_DIR = "traces"
+UNDO_DIR = "undo"
 PROJECT_TRACE_FILE = "project_trace.json"
 DEFAULT_REVIEW_RECENT_TURNS = 10
 SUMMARY_LIST_LIMIT = 40
@@ -27,6 +30,7 @@ FEEDBACK_RE = re.compile(
     r"(\u4e0d\u5bf9|\u4e0d\u662f|\u4e0d\u5e94\u8be5|\u5e94\u8be5|\u95ee\u9898|\u5931\u8d25|\u9519\u4e86|\u9519\u8bef|\u522b|\u4e0d\u8981|\u4ee5\u540e|\u4e0b\u6b21|\u8bb0\u4f4f|\u6ee1\u610f|bug|wrong|should|shouldn't|do not)",
     re.I,
 )
+_CURRENT_TRACE_RECORDER: ContextVar[Any] = ContextVar("current_trace_recorder", default=None)
 
 
 @dataclass
@@ -34,6 +38,8 @@ class TurnTraceRecorder:
     workspace: str | Path
     thread_id: str
     user_request: str
+    git_baseline_status: str = ""
+    git_baseline_dirty_paths: list[str] = field(default_factory=list)
     turn_id: str = field(default_factory=lambda: f"turn_{uuid.uuid4().hex[:8]}")
 
     def __post_init__(self) -> None:
@@ -43,6 +49,51 @@ class TurnTraceRecorder:
         self._call_index: dict[str, int] = {}
         self._seen_tool_calls: set[str] = set()
         self._seen_tool_results: set[str] = set()
+        self.undo_snapshots: list[dict[str, Any]] = []
+        self._snapshot_paths: set[str] = set()
+
+    def capture_write_snapshot(self, tool_name: str, path: str) -> None:
+        if tool_name not in WRITE_TOOL_NAMES:
+            return
+
+        rel_path = _normalize_workspace_path(self.workspace, path)
+        if not rel_path:
+            return
+
+        baseline_dirty = {
+            _normalize_path(str(item))
+            for item in self.git_baseline_dirty_paths
+            if str(item)
+        }
+        if rel_path not in baseline_dirty or rel_path in self._snapshot_paths:
+            return
+
+        workspace = Workspace(self.workspace)
+        target = workspace.resolve(rel_path)
+        if target.exists() and not target.is_file():
+            raise WorkspaceError(f"Cannot snapshot non-file path for undo: {rel_path}")
+
+        ensure_agent_state_ignored(self.workspace)
+        snapshot_id = uuid.uuid4().hex
+        snapshot_path = undo_root(self.workspace) / self.turn_id / f"{snapshot_id}.bin"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+
+        existed = target.exists()
+        if existed:
+            snapshot_path.write_bytes(target.read_bytes())
+        else:
+            snapshot_path.write_bytes(b"")
+
+        self._snapshot_paths.add(rel_path)
+        self.undo_snapshots.append(
+            {
+                "path": rel_path,
+                "snapshot_path": snapshot_path.relative_to(self.workspace).as_posix(),
+                "existed": existed,
+                "tool": tool_name,
+                "created_at": _utc_now(),
+            }
+        )
 
     def record_chunk(self, chunk: Mapping[str, Any]) -> None:
         if "__interrupt__" in chunk:
@@ -142,6 +193,11 @@ class TurnTraceRecorder:
             "created_at": _utc_now(),
             "started_at": self.started_at,
             "user_request": self.user_request,
+            "git_baseline": {
+                "status": truncate(self.git_baseline_status, 4000),
+                "dirty_paths": list(self.git_baseline_dirty_paths),
+            },
+            "undo_snapshots": list(self.undo_snapshots),
             "final_answer": truncate(final_answer, 4000),
             "tool_trace": self.tool_trace,
             "file_changes": file_changes,
@@ -178,8 +234,26 @@ def trace_root(workspace: str | Path) -> Path:
     return Path(workspace).expanduser().resolve() / STATE_DIR / TRACE_DIR
 
 
+def undo_root(workspace: str | Path) -> Path:
+    return Path(workspace).expanduser().resolve() / STATE_DIR / UNDO_DIR
+
+
 def project_trace_path(workspace: str | Path) -> Path:
     return trace_root(workspace) / PROJECT_TRACE_FILE
+
+
+def set_current_trace_recorder(recorder: Any) -> Token:
+    return _CURRENT_TRACE_RECORDER.set(recorder)
+
+
+def reset_current_trace_recorder(token: Token) -> None:
+    _CURRENT_TRACE_RECORDER.reset(token)
+
+
+def capture_current_write_snapshot(tool_name: str, path: str) -> None:
+    recorder = _CURRENT_TRACE_RECORDER.get()
+    if recorder is not None:
+        recorder.capture_write_snapshot(tool_name, path)
 
 
 def append_turn_trace(workspace: str | Path, turn_trace: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
@@ -454,6 +528,18 @@ def _tool_call_name(tool_call: Mapping[str, Any]) -> str:
 
 def _tool_call_args(tool_call: Mapping[str, Any]) -> Any:
     return tool_call.get("args") or {}
+
+
+def _normalize_workspace_path(workspace: str | Path, path: str) -> str:
+    try:
+        workspace_obj = Workspace(workspace)
+        return _normalize_path(workspace_obj.relative(workspace_obj.resolve(path)))
+    except WorkspaceError:
+        return ""
+
+
+def _normalize_path(path: str) -> str:
+    return path.replace("\\", "/").strip().strip("/")
 
 
 def _object_fields(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
