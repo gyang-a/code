@@ -13,6 +13,7 @@ from code_agent.graph import (
     _approval_interrupt_config,
     build_tools,
 )
+from code_agent.services.skills import SkillInfo
 from code_agent.main import (
     _build_agent_undo_plan,
     _format_sessions,
@@ -313,6 +314,38 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertIn("base", content)
         self.assertIn("Runtime metadata:", content)
         self.assertIn("Command execution: unavailable to the agent.", content)
+
+    def test_runtime_metadata_injects_global_skill_index_and_loading_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            middleware = RuntimeMetadataMiddleware(
+                workspace=Workspace(tmp),
+                max_tool_calls_per_turn=3,
+            )
+            request = ModelRequest(
+                model=object(),
+                messages=[],
+                system_message=SystemMessage(content="base"),
+            )
+
+            class FakeSkillStore:
+                def list_skills(self):
+                    return [
+                        SkillInfo(
+                            name="vite-network-config",
+                            description="Configure Vite network access.",
+                            path="skills/vite-network-config/SKILL.md",
+                        )
+                    ]
+
+            def handler(updated_request):
+                return updated_request.system_message.content
+
+            with patch("code_agent.graph.SkillStore", return_value=FakeSkillStore()):
+                content = middleware.wrap_model_call(request, handler)
+
+        self.assertIn("Available global skills:", content)
+        self.assertIn("vite-network-config", content)
+        self.assertIn("call skill_view for that skill before inspecting or editing", content)
 
 
 class FakeToolCallRequest:

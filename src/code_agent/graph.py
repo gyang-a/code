@@ -144,7 +144,10 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
             f"{build_turn_metadata(self.workspace)}\n\n"
             "Available global skills:\n"
             f"{format_skill_index(SkillStore().list_skills())}\n\n"
-            "Use skill_view only when a listed skill is relevant to the current user request.\n\n"
+            "Skill loading rules:\n"
+            "- Compare the current user request with the available global skills before taking action.\n"
+            "- If a listed skill is relevant, call skill_view for that skill before inspecting or editing project files.\n"
+            "- If no listed skill is relevant, continue without calling skill_view.\n\n"
             "Command execution: unavailable to the agent.\n"
             f"Tool call budget hint: prefer at most {self.max_tool_calls_per_turn} tool calls per model turn."
         )
