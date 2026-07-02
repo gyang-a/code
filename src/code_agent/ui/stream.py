@@ -20,6 +20,12 @@ NODE_LABELS = {
     "tool_result_router": "Processed tool results",
 }
 
+TODO_MARKERS = {
+    "pending": "[ ]",
+    "in_progress": "[>]",
+    "completed": "[x]",
+}
+
 
 def render_stream_chunk(chunk: Mapping[str, Any]) -> None:
     if "__interrupt__" in chunk:
@@ -69,8 +75,13 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 
 def _render_node_update(update: Mapping[str, Any]) -> None:
+    if update.get("todos"):
+        _render_todos(update["todos"])
     if update.get("messages"):
-        _render_messages(update["messages"])
+        _render_messages(
+            update["messages"],
+            suppress_todo_tool_result=bool(update.get("todos")),
+        )
 
 
 def _should_render_update(node_name: str, update: Any) -> bool:
@@ -78,7 +89,7 @@ def _should_render_update(node_name: str, update: Any) -> bool:
         return True
     if not update:
         return False
-    renderable_keys = {"messages", "final_answer"}
+    renderable_keys = {"messages", "final_answer", "todos"}
     if any(update.get(key) for key in renderable_keys):
         return True
     if ".before_" in node_name or ".after_" in node_name:
@@ -86,7 +97,37 @@ def _should_render_update(node_name: str, update: Any) -> bool:
     return False
 
 
-def _render_messages(messages: list[BaseMessage]) -> None:
+def _render_todos(todos: Any) -> None:
+    lines = _format_todos(todos)
+    if not lines:
+        return
+    console.print("[magenta]  plan:[/magenta]")
+    for line in lines:
+        console.print(f"[dim]    {escape(line)}[/dim]")
+
+
+def _format_todos(todos: Any) -> list[str]:
+    if not isinstance(todos, list):
+        return []
+
+    lines: list[str] = []
+    for item in todos:
+        if not isinstance(item, Mapping):
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        status = str(item.get("status") or "pending")
+        marker = TODO_MARKERS.get(status, "[?]")
+        lines.append(f"{marker} {content}")
+    return lines
+
+
+def _render_messages(
+    messages: list[BaseMessage],
+    *,
+    suppress_todo_tool_result: bool = False,
+) -> None:
     for message in messages:
         if isinstance(message, AIMessage):
             tool_calls = getattr(message, "tool_calls", None) or []
@@ -99,6 +140,8 @@ def _render_messages(messages: list[BaseMessage]) -> None:
                 console.print("[dim]  Agent drafted a response[/dim]")
         elif isinstance(message, ToolMessage):
             content = str(message.content)
+            if suppress_todo_tool_result and content.startswith("Updated todo list to "):
+                continue
             first_line = content.splitlines()[0] if content.strip() else "empty tool result"
             style = "red" if first_line.startswith("REJECTED[") else "dim"
             console.print(f"[{style}]  tool result:[/{style}] {escape(_tool_result_summary(content))}")

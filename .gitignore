@@ -16,3 +16,4 @@ build/
 .code-agent/checkpoints.sqlite3*
 .code-agent/pending/
 .code-agent/traces/
+.understand-anything

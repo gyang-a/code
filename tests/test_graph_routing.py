@@ -24,7 +24,7 @@ from code_agent.main import (
 )
 from code_agent.services.persistence import SessionRecord
 from code_agent.services.workspace import Workspace
-from code_agent.ui.stream import _should_render_update, _tool_result_summary
+from code_agent.ui.stream import _format_todos, _should_render_update, _tool_result_summary
 
 
 class GraphRoutingTests(unittest.TestCase):
@@ -216,6 +216,25 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertFalse(_should_render_update("SummarizationMiddleware.before_model", {}))
         self.assertFalse(_should_render_update("ModelCallLimitMiddleware.after_model", {}))
         self.assertTrue(_should_render_update("model", {"messages": ["x"]}))
+
+    def test_stream_renders_todo_updates(self) -> None:
+        self.assertTrue(
+            _should_render_update(
+                "tools",
+                {"todos": [{"content": "Inspect graph middleware", "status": "in_progress"}]},
+            )
+        )
+
+    def test_format_todos_uses_stable_ascii_markers(self) -> None:
+        lines = _format_todos(
+            [
+                {"content": "Inspect", "status": "completed"},
+                {"content": "Patch", "status": "in_progress"},
+                {"content": "Verify", "status": "pending"},
+            ]
+        )
+
+        self.assertEqual(lines, ["[x] Inspect", "[>] Patch", "[ ] Verify"])
 
     def test_agent_toolset_does_not_expose_command_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

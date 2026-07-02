@@ -10,6 +10,7 @@ from langchain.agents.middleware import (
     ModelRequest,
     ModelResponse,
     SummarizationMiddleware,
+    TodoListMiddleware,
     ToolCallLimitMiddleware,
 )
 from langchain.chat_models import init_chat_model
@@ -92,6 +93,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
                 workspace=workspace,
                 max_tool_calls_per_turn=agent_config.max_tool_calls_per_turn,
             ),
+            TodoListMiddleware(),
             HumanInTheLoopMiddleware(
                 interrupt_on=_approval_interrupt_config(workspace, tools),
                 description_prefix="Tool execution requires approval",
