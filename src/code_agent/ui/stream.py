@@ -187,7 +187,11 @@ def _render_messages(
             if suppress_todo_tool_result and content.startswith("Updated todo list to "):
                 continue
             first_line = content.splitlines()[0] if content.strip() else "empty tool result"
-            style = "red" if first_line.startswith("REJECTED[") else "dim"
+            style = (
+                "red"
+                if message.status == "error" or first_line.startswith("REJECTED[")
+                else "dim"
+            )
             console.print(f"[{style}]  tool result:[/{style}] {escape(_tool_result_summary(content))}")
 
 

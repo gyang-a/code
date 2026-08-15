@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel
 
@@ -23,3 +24,22 @@ class PermissionDecision(BaseModel):
     allowed: bool
     requires_approval: bool = False
     reason: str
+
+
+class AgentError(TypedDict):
+    source: str
+    category: Literal[
+        "validation",
+        "permission",
+        "sandbox",
+        "timeout",
+        "network",
+        "tool_execution",
+        "model",
+    ]
+    code: str
+    message: str
+    retryable: bool
+    attempt: int
+    tool_call_id: str | None
+    details: dict[str, Any]

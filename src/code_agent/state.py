@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import operator
 from typing import Annotated, NotRequired, Required, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+
+from code_agent.models import AgentError
 
 
 class AgentState(TypedDict, total=False):
@@ -16,5 +19,5 @@ class AgentState(TypedDict, total=False):
     changed_files: NotRequired[list[str]]
     did_write: NotRequired[bool]
 
-    tool_errors: NotRequired[list[str]]
+    tool_errors: NotRequired[Annotated[list[AgentError], operator.add]]
     final_answer: NotRequired[str | None]

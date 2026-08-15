@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from code_agent.services.memory import format_project_memory, load_project_memory
+from code_agent.services.memory import format_project_memory, load_relevant_project_memory
 from code_agent.services.summarizer import truncate
 from code_agent.services.workspace import Workspace, WorkspaceError
 
@@ -29,7 +29,12 @@ PROJECT_MARKERS = (
 )
 
 
-def build_turn_metadata(workspace: Workspace, *, max_entries: int = 25) -> str:
+def build_turn_metadata(
+    workspace: Workspace,
+    *,
+    max_entries: int = 25,
+    memory_query: str = "",
+) -> str:
     """
     Build compact per-turn context for the agent.
 
@@ -66,7 +71,9 @@ def build_turn_metadata(workspace: Workspace, *, max_entries: int = 25) -> str:
         *_top_level_entries(workspace, max_entries=max_entries),
     ]
 
-    memory = format_project_memory(load_project_memory(workspace))
+    memory = format_project_memory(
+        load_relevant_project_memory(workspace, query=memory_query)
+    )
     if memory.strip():
         lines.extend(
             [

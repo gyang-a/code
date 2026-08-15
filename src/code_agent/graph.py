@@ -18,12 +18,18 @@ from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from code_agent.config import AgentConfig
+from code_agent.middleware import (
+    ModelRetryMiddleware,
+    PerModelToolCallLimitMiddleware,
+    ToolErrorMiddleware,
+)
 from code_agent.prompts import SYSTEM_PROMPT
 from code_agent.services.metadata import build_turn_metadata
 from code_agent.services.permissions import classify_tool_call
 from code_agent.services.skills import SkillStore, format_skill_index
 from code_agent.services.workspace import Workspace
 from code_agent.state import AgentState
+from code_agent.ui.console import console
 from code_agent.tools import (
     build_create_file_tool,
     build_delete_file_tool,
@@ -94,11 +100,18 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
     )
     llm_kwargs = {
         "temperature": 0,
-        "timeout": agent_config.model_timeout_seconds,
+        "timeout": agent_config.model_request_timeout_seconds,
     }
     if agent_config.api_key:
         llm_kwargs["api_key"] = agent_config.api_key
     llm = init_chat_model(agent_config.model, model_provider="deepseek", **llm_kwargs)
+    fallback_llm = None
+    if agent_config.fallback_model and agent_config.fallback_model != agent_config.model:
+        fallback_llm = init_chat_model(
+            agent_config.fallback_model,
+            model_provider="deepseek",
+            **llm_kwargs,
+        )
 
     return create_agent(
         llm,
@@ -109,11 +122,22 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
                 workspace=workspace,
                 max_tool_calls_per_turn=agent_config.max_tool_calls_per_turn,
             ),
+            ModelRetryMiddleware(
+                max_retries=agent_config.model_max_retries,
+                total_timeout_seconds=agent_config.model_timeout_seconds,
+                base_delay_seconds=agent_config.model_retry_base_delay_seconds,
+                max_delay_seconds=agent_config.model_retry_max_delay_seconds,
+                fallback_model=fallback_llm,
+                on_retry=_print_model_retry,
+                on_fallback=_print_model_fallback,
+            ),
+            PerModelToolCallLimitMiddleware(agent_config.max_tool_calls_per_turn),
             TodoListMiddleware(),
             HumanInTheLoopMiddleware(
                 interrupt_on=_approval_interrupt_config(workspace, tools),
                 description_prefix="Tool execution requires approval",
             ),
+            ToolErrorMiddleware(),
             SummarizationMiddleware(
                 llm,
                 trigger=[
@@ -123,7 +147,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
                 keep=("messages", agent_config.context_keep_recent),
             ),
             ToolCallLimitMiddleware(
-                run_limit=agent_config.max_iterations * agent_config.max_tool_calls_per_turn,
+                run_limit=agent_config.max_total_tool_calls_per_run,
                 exit_behavior="continue",
             ),
             ModelCallLimitMiddleware(
@@ -133,6 +157,24 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
         ],
         state_schema=AgentState,
         checkpointer=checkpointer or InMemorySaver(),
+    )
+
+
+def _print_model_retry(
+    next_attempt: int,
+    total_attempts: int,
+    delay_seconds: float,
+    exc: Exception,
+) -> None:
+    console.print(
+        f"[dim yellow]模型请求暂时失败，{delay_seconds:.1f} 秒后重试 "
+        f"{next_attempt}/{total_attempts}（{type(exc).__name__}）…[/dim yellow]"
+    )
+
+
+def _print_model_fallback(exc: Exception) -> None:
+    console.print(
+        f"[dim yellow]主模型连续失败，正在切换备用模型（{type(exc).__name__}）…[/dim yellow]"
     )
 
 
@@ -153,11 +195,13 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
         handler,
     ) -> ModelResponse | Any:
         base = request.system_message.text if request.system_message else SYSTEM_PROMPT
+        state = request.state if isinstance(request.state, dict) else {}
+        memory_query = str(state.get("user_goal") or "")
         runtime_metadata = (
             "Runtime metadata:\n"
             "The host provides the current project folder snapshot below. Treat it as current context, "
             "not as conversation history.\n\n"
-            f"{build_turn_metadata(self.workspace)}\n\n"
+            f"{build_turn_metadata(self.workspace, memory_query=memory_query)}\n\n"
             "Available global skills:\n"
             f"{format_skill_index(SkillStore().list_skills())}\n\n"
             "Skill loading rules:\n"
@@ -172,7 +216,8 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
             "PowerShell process; controlled modes use ConstrainedLanguage and workdir replaces cd. Any workspace-write "
             "denial, or a read-only process-pipe denial such as spawn EPERM, permits one exact retry with sandbox_permissions='danger-full-access' "
             "and separate approval. Never request it speculatively or change the command spelling.\n"
-            f"Tool call budget hint: prefer at most {self.max_tool_calls_per_turn} tool calls per model turn."
+            f"Tool call budget: the host executes at most {self.max_tool_calls_per_turn} tool calls from each model response. "
+            "If more work remains, continue it in a later response."
         )
         return handler(
             request.override(

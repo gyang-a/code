@@ -43,6 +43,9 @@ class GraphRoutingTests(unittest.TestCase):
 
         self.assertEqual(config.model_timeout_seconds, 120.0)
         self.assertEqual(config.max_tool_calls_per_turn, 5)
+        self.assertEqual(config.max_total_tool_calls_per_run, 80)
+        self.assertEqual(config.model_request_timeout_seconds, 45.0)
+        self.assertEqual(config.model_max_retries, 2)
 
     def test_model_timeout_detection_handles_wrapped_client_errors(self) -> None:
         class APITimeoutError(RuntimeError):

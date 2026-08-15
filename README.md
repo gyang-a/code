@@ -53,6 +53,28 @@ Approval protocol data is not appended to `messages`; it lives only in the inter
 
 The graph compacts old messages when message count or estimated characters exceed configured limits. It keeps recent `AIMessage(tool_calls) + ToolMessage` blocks intact so tool observations are not orphaned, stores the summary in `state.context_summary`, and injects that summary only for later LLM calls.
 
+Project instructions in `AGENTS.md` are always injected. Long-term notes in
+`.code-agent/memory.md` are split by Markdown heading and indexed in
+`.code-agent/memory.sqlite3`; only sections relevant to the current user goal are added
+to model context.
+
+## Reliability Controls
+
+Each model response is hard-limited to five tool calls before it reaches the tool
+executor. Extra calls are omitted with a host note so the model can continue the
+remaining work in a later response. A separate run-level limit bounds the total tool
+calls across the whole agent run.
+
+Transient model failures (timeouts, connection errors, HTTP 429, and HTTP 5xx) are
+retried twice with exponential backoff and jitter. Authentication, validation, and
+other non-transient failures are not retried. Set `CODE_AGENT_FALLBACK_MODEL` to make
+one final attempt with a second DeepSeek model after primary retries are exhausted.
+
+Tool failures remain readable `ToolMessage` objects and are also recorded as structured
+`AgentError` entries in graph state and turn traces. The structured record includes the
+source, category, stable code, retryability, attempt, call id, and details such as a
+process exit code.
+
 ## Global Skills
 
 Code Agent can use a reusable skill library across all workspaces. By default, skills
@@ -93,19 +115,20 @@ Legacy pending proposals are still supported for old local data:
 
 ## Turn Traces
 
-Each agent turn appends an audit record to one project trace under the selected
-workspace:
+Each agent turn appends an audit record to a project-local SQLite trace store:
 
 ```text
-.code-agent/traces/project_trace.json
+.code-agent/traces.sqlite3
 ```
 
-The trace directory is local state. Code Agent writes `.code-agent/.gitignore` and, when
+The trace store is local state. Code Agent writes `.code-agent/.gitignore` and, when
 the workspace is a Git repository, adds `.code-agent/` to `.git/info/exclude` so traces
 and checkpoints are not tracked by project Git history. Skill review reads this project
 trace so user feedback and corrections across turns are visible. When the project trace
 grows, review receives a bounded view: a structured historical summary plus the most
-recent raw turns, rather than the full trace file.
+recent raw turns. The latest 100 turns retain their complete payload; older turns are
+represented by the aggregate summary. Existing `.code-agent/traces/project_trace.json`
+files are imported once and retained as legacy backups.
 
 ## Undo
 

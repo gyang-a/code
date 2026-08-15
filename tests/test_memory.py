@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from code_agent.services.memory import format_project_memory, load_project_memory
+from code_agent.services.memory import (
+    format_project_memory,
+    load_project_memory,
+    load_relevant_project_memory,
+)
 from code_agent.services.metadata import build_turn_metadata
 from code_agent.services.workspace import Workspace
 
@@ -50,6 +54,50 @@ class MemoryTests(unittest.TestCase):
             self.assertIn("... truncated ...", metadata)
             self.assertNotIn("/workspace", metadata)
             self.assertNotIn(str(tmp_path), metadata)
+
+    def test_retrieves_relevant_memory_sections_but_always_keeps_agents_rules(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            (tmp_path / "AGENTS.md").write_text(
+                "Always run tests after editing.",
+                encoding="utf-8",
+            )
+            state_dir = tmp_path / ".code-agent"
+            state_dir.mkdir()
+            (state_dir / "memory.md").write_text(
+                "## Build commands\nUse npm run build for production.\n\n"
+                "## Styling\nUse blue buttons for primary actions.\n",
+                encoding="utf-8",
+            )
+            workspace = Workspace(tmp_path)
+
+            entries = load_relevant_project_memory(
+                workspace,
+                query="怎么执行生产构建 build",
+            )
+            rendered = format_project_memory(entries)
+
+            self.assertIn("Always run tests", rendered)
+            self.assertIn("npm run build", rendered)
+            self.assertNotIn("blue buttons", rendered)
+            self.assertTrue((state_dir / "memory.sqlite3").is_file())
+
+    def test_turn_metadata_uses_current_goal_for_memory_retrieval(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            state_dir = tmp_path / ".code-agent"
+            state_dir.mkdir()
+            (state_dir / "memory.md").write_text(
+                "## Testing\nRun pytest -q before delivery.\n\n"
+                "## Deployment\nDeploy only from main.\n",
+                encoding="utf-8",
+            )
+
+            metadata = build_turn_metadata(
+                Workspace(tmp_path),
+                memory_query="请运行 pytest 测试",
+            )
+
+            self.assertIn("pytest -q", metadata)
+            self.assertNotIn("Deploy only from main", metadata)
 
 
 class TemporaryWorkspace:

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import sqlite3
 import subprocess
+import time
 import uuid
 from collections.abc import Mapping
+from contextlib import closing
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,7 +26,11 @@ STATE_DIR = ".code-agent"
 TRACE_DIR = "traces"
 UNDO_DIR = "undo"
 PROJECT_TRACE_FILE = "project_trace.json"
+PROJECT_TRACE_DB = "traces.sqlite3"
 DEFAULT_REVIEW_RECENT_TURNS = 10
+MAX_FULL_TRACE_TURNS = 100
+UNDO_RECENT_TURNS = 20
+UNDO_MAX_AGE_DAYS = 30
 SUMMARY_LIST_LIMIT = 40
 WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
 SNAPSHOT_TOOL_NAMES = WRITE_TOOL_NAMES | {"shell_command"}
@@ -196,12 +204,16 @@ class TurnTraceRecorder:
         self._seen_tool_results.add(result_key)
 
         content = str(getattr(message, "content", "") or "")
-        status = _status_from_tool_result(content)
+        message_status = str(getattr(message, "status", "") or "")
+        status = "error" if message_status == "error" else _status_from_tool_result(content)
         result_payload = {
             "completed_at": _utc_now(),
             "status": status,
             "result_summary": truncate(content, 2000),
         }
+        artifact = getattr(message, "artifact", None)
+        if isinstance(artifact, Mapping) and isinstance(artifact.get("agent_error"), Mapping):
+            result_payload["structured_error"] = sanitize_json(artifact["agent_error"])
 
         if call_id in self._call_index:
             self.tool_trace[self._call_index[call_id]].update(result_payload)
@@ -278,6 +290,10 @@ def undo_root(workspace: str | Path) -> Path:
 
 
 def project_trace_path(workspace: str | Path) -> Path:
+    return Path(workspace).expanduser().resolve() / STATE_DIR / PROJECT_TRACE_DB
+
+
+def legacy_project_trace_path(workspace: str | Path) -> Path:
     return trace_root(workspace) / PROJECT_TRACE_FILE
 
 
@@ -311,38 +327,72 @@ def append_turn_trace(workspace: str | Path, turn_trace: dict[str, Any]) -> tupl
     path = project_trace_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     ensure_agent_state_ignored(workspace)
+    _ensure_trace_store(workspace)
+
+    turn_trace = dict(turn_trace)
+    turn_trace["trace_path"] = str(path)
+    turn_id = str(turn_trace.get("turn_id") or f"turn_{uuid.uuid4().hex[:8]}")
+    turn_trace["turn_id"] = turn_id
+    now = _utc_now()
+
+    with closing(sqlite3.connect(path)) as conn, conn:
+        existing = conn.execute(
+            "SELECT 1 FROM trace_turns WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        current_count = _meta_int(conn, "turn_count")
+        summary = _meta_json(conn, "summary", _new_summary())
+        if existing is None:
+            current_count += 1
+            summary = _update_summary(
+                _normalize_summary(summary),
+                turn_trace,
+                turn_count=current_count,
+            )
+        conn.execute(
+            "INSERT INTO trace_turns(turn_id, created_at, payload_json) VALUES (?, ?, ?) "
+            "ON CONFLICT(turn_id) DO UPDATE SET created_at = excluded.created_at, "
+            "payload_json = excluded.payload_json",
+            (turn_id, str(turn_trace.get("created_at") or now), _json_dump(turn_trace)),
+        )
+        _set_meta(conn, "workspace", str(Path(workspace).expanduser().resolve()))
+        _set_meta(conn, "updated_at", now)
+        _set_meta(conn, "latest_turn_id", turn_id)
+        _set_meta(conn, "turn_count", current_count)
+        _set_meta(conn, "existing_skills", list(turn_trace.get("existing_skills") or []))
+        _set_meta(conn, "summary", summary)
+        _prune_trace_rows(conn, keep=MAX_FULL_TRACE_TURNS)
 
     project_trace = load_project_trace(workspace)
-    turn_trace["trace_path"] = str(path)
-    project_trace["workspace"] = str(Path(workspace).expanduser().resolve())
-    project_trace["updated_at"] = _utc_now()
-    project_trace["trace_path"] = str(path)
-    project_trace["latest_turn_id"] = str(turn_trace.get("turn_id") or "")
-    project_trace["existing_skills"] = list(turn_trace.get("existing_skills") or [])
-    project_trace.setdefault("turns", []).append(turn_trace)
-    project_trace["turn_count"] = len(project_trace["turns"])
-    project_trace["summary"] = _update_summary(
-        _normalize_summary(project_trace.get("summary")),
-        turn_trace,
-        turn_count=project_trace["turn_count"],
-    )
-
-    path.write_text(json.dumps(project_trace, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="")
+    _prune_undo_snapshots(workspace, project_trace)
     return path, project_trace
 
 
 def load_project_trace(workspace: str | Path) -> dict[str, Any]:
     path = project_trace_path(workspace)
-    if not path.is_file():
-        return _new_project_trace(workspace, path)
-
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        _ensure_trace_store(workspace)
+        with closing(sqlite3.connect(path)) as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM trace_turns ORDER BY sequence"
+            ).fetchall()
+            turns = [_json_object(row[0]) for row in rows]
+            turns = [turn for turn in turns if turn is not None]
+            project_trace = _new_project_trace(workspace, path)
+            project_trace.update(
+                {
+                    "created_at": _meta_text(conn, "created_at") or project_trace["created_at"],
+                    "updated_at": _meta_text(conn, "updated_at") or project_trace["updated_at"],
+                    "turn_count": _meta_int(conn, "turn_count") or len(turns),
+                    "latest_turn_id": _meta_text(conn, "latest_turn_id"),
+                    "existing_skills": _meta_json(conn, "existing_skills", []),
+                    "summary": _normalize_summary(_meta_json(conn, "summary", _new_summary())),
+                    "turns": turns,
+                }
+            )
+            return project_trace
+    except (OSError, sqlite3.Error):
         return _new_project_trace(workspace, path)
-    if not isinstance(data, dict):
-        return _new_project_trace(workspace, path)
-    return _normalize_project_trace(data, workspace, path)
 
 
 def reviewable_project_trace(
@@ -356,14 +406,15 @@ def reviewable_project_trace(
         return dict(project_trace)
 
     recent_turns = turn_list[-recent_turns_limit:]
+    total_turns = int(project_trace.get("turn_count") or len(turn_list))
     return {
         "schema_version": project_trace.get("schema_version", 1),
         "workspace": project_trace.get("workspace", ""),
         "trace_path": project_trace.get("trace_path", ""),
         "created_at": project_trace.get("created_at", ""),
         "updated_at": project_trace.get("updated_at", ""),
-        "turn_count": len(turn_list),
-        "omitted_older_turns": max(0, len(turn_list) - len(recent_turns)),
+        "turn_count": total_turns,
+        "omitted_older_turns": max(0, total_turns - len(recent_turns)),
         "latest_turn_id": project_trace.get("latest_turn_id", ""),
         "existing_skills": project_trace.get("existing_skills", []),
         "historical_summary": _normalize_summary(project_trace.get("summary")),
@@ -416,6 +467,154 @@ def sanitize_json(value: Any, *, max_string: int = 1200) -> Any:
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return truncate(str(value), max_string)
+
+
+def _ensure_trace_store(workspace: str | Path) -> Path:
+    path = project_trace_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_agent_state_ignored(workspace)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS trace_meta "
+            "(key TEXT PRIMARY KEY, value_json TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS trace_turns ("
+            "sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "turn_id TEXT NOT NULL UNIQUE, "
+            "created_at TEXT NOT NULL, "
+            "payload_json TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trace_turns_created_at "
+            "ON trace_turns(created_at)"
+        )
+        if _meta_text(conn, "created_at") == "":
+            _set_meta(conn, "created_at", _utc_now())
+            _set_meta(conn, "turn_count", 0)
+            _set_meta(conn, "summary", _new_summary())
+        _migrate_legacy_trace(conn, workspace)
+    return path
+
+
+def _migrate_legacy_trace(conn: sqlite3.Connection, workspace: str | Path) -> None:
+    if _meta_text(conn, "legacy_migration_complete") == "true":
+        return
+    legacy_path = legacy_project_trace_path(workspace)
+    if not legacy_path.is_file():
+        _set_meta(conn, "legacy_migration_complete", "true")
+        return
+
+    try:
+        raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _set_meta(conn, "legacy_migration_complete", "true")
+        return
+    if not isinstance(raw, dict):
+        _set_meta(conn, "legacy_migration_complete", "true")
+        return
+
+    legacy = _normalize_project_trace(raw, workspace, legacy_path)
+    for turn in legacy.get("turns", []):
+        if not isinstance(turn, Mapping):
+            continue
+        turn_payload = dict(turn)
+        turn_id = str(turn_payload.get("turn_id") or f"turn_{uuid.uuid4().hex[:8]}")
+        turn_payload["turn_id"] = turn_id
+        turn_payload["trace_path"] = str(project_trace_path(workspace))
+        conn.execute(
+            "INSERT OR IGNORE INTO trace_turns(turn_id, created_at, payload_json) VALUES (?, ?, ?)",
+            (
+                turn_id,
+                str(turn_payload.get("created_at") or _utc_now()),
+                _json_dump(turn_payload),
+            ),
+        )
+    _set_meta(conn, "workspace", str(Path(workspace).expanduser().resolve()))
+    _set_meta(conn, "created_at", str(legacy.get("created_at") or _utc_now()))
+    _set_meta(conn, "updated_at", str(legacy.get("updated_at") or _utc_now()))
+    _set_meta(conn, "turn_count", int(legacy.get("turn_count") or len(legacy.get("turns", []))))
+    _set_meta(conn, "latest_turn_id", str(legacy.get("latest_turn_id") or ""))
+    _set_meta(conn, "existing_skills", list(legacy.get("existing_skills") or []))
+    _set_meta(conn, "summary", _normalize_summary(legacy.get("summary")))
+    _set_meta(conn, "legacy_migration_complete", "true")
+    _prune_trace_rows(conn, keep=MAX_FULL_TRACE_TURNS)
+
+
+def _prune_trace_rows(conn: sqlite3.Connection, *, keep: int) -> None:
+    conn.execute(
+        "DELETE FROM trace_turns WHERE sequence NOT IN "
+        "(SELECT sequence FROM trace_turns ORDER BY sequence DESC LIMIT ?)",
+        (max(1, keep),),
+    )
+
+
+def _prune_undo_snapshots(workspace: str | Path, project_trace: Mapping[str, Any]) -> None:
+    root = undo_root(workspace).resolve()
+    if not root.is_dir():
+        return
+    turns = project_trace.get("turns")
+    turn_list = turns if isinstance(turns, list) else []
+    protected = {
+        str(turn.get("turn_id") or "")
+        for turn in turn_list[-UNDO_RECENT_TURNS:]
+        if isinstance(turn, Mapping)
+    }
+    cutoff = time.time() - UNDO_MAX_AGE_DAYS * 24 * 60 * 60
+    for candidate in root.iterdir():
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+            if not resolved.is_dir() or resolved.name in protected:
+                continue
+            if resolved.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(resolved)
+        except (OSError, ValueError):
+            continue
+
+
+def _set_meta(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    conn.execute(
+        "INSERT INTO trace_meta(key, value_json) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+        (key, _json_dump(value)),
+    )
+
+
+def _meta_json(conn: sqlite3.Connection, key: str, default: Any) -> Any:
+    row = conn.execute("SELECT value_json FROM trace_meta WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return default
+    try:
+        return json.loads(str(row[0]))
+    except json.JSONDecodeError:
+        return default
+
+
+def _meta_text(conn: sqlite3.Connection, key: str) -> str:
+    value = _meta_json(conn, key, "")
+    return str(value) if value is not None else ""
+
+
+def _meta_int(conn: sqlite3.Connection, key: str) -> int:
+    value = _meta_json(conn, key, 0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _json_dump(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_object(raw: Any) -> dict[str, Any] | None:
+    try:
+        value = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _new_project_trace(workspace: str | Path, path: Path) -> dict[str, Any]:
@@ -519,8 +718,8 @@ def _update_summary(summary: dict[str, Any], turn_trace: Mapping[str, Any], *, t
             summary["errors"],
             {
                 "turn_id": turn_id,
-                "tool": error.get("tool"),
-                "status": error.get("status"),
+                "tool": error.get("tool") or error.get("source"),
+                "status": error.get("status") or error.get("category"),
                 "message": truncate(str(error.get("message") or ""), 800),
             },
         )
@@ -676,14 +875,18 @@ def _errors_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for step in steps:
         if step.get("status") not in {"error", "rejected"}:
             continue
-        errors.append(
-            {
-                "tool": step.get("tool"),
-                "call_id": step.get("call_id"),
-                "status": step.get("status"),
-                "message": step.get("result_summary"),
-            }
-        )
+        structured = step.get("structured_error")
+        if isinstance(structured, Mapping):
+            errors.append(dict(structured))
+        else:
+            errors.append(
+                {
+                    "tool": step.get("tool"),
+                    "call_id": step.get("call_id"),
+                    "status": step.get("status"),
+                    "message": step.get("result_summary"),
+                }
+            )
     return errors
 
 

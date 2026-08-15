@@ -812,16 +812,9 @@ def _run_graph_stream(
 def _is_model_timeout_error(exc: BaseException) -> bool:
     """Recognize timeout wrappers raised by httpx/OpenAI/LangChain clients."""
 
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        name = type(current).__name__.lower()
-        message = str(current).lower()
-        if isinstance(current, TimeoutError) or "timeout" in name or "timed out" in message:
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    from code_agent.services.errors import is_timeout_error
+
+    return is_timeout_error(exc)
 
 
 def _update_usage_from_chunk(session: Session, chunk: Mapping[str, Any]) -> None:

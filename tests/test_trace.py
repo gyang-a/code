@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -188,13 +189,63 @@ class TraceTests(unittest.TestCase):
             second_path, second_project_trace = append_turn_trace(tmp, second_turn)
 
             self.assertEqual(first_path, second_path)
-            self.assertEqual(second_path, Path(tmp).resolve() / ".code-agent" / "traces" / "project_trace.json")
+            self.assertEqual(second_path, Path(tmp).resolve() / ".code-agent" / "traces.sqlite3")
             self.assertTrue(second_path.is_file())
             self.assertEqual(first_project_trace["turn_count"], 1)
             self.assertEqual(second_project_trace["turn_count"], 2)
             self.assertEqual([turn["turn_id"] for turn in second_project_trace["turns"]], ["turn_001", "turn_002"])
             self.assertEqual(load_project_trace(tmp)["turn_count"], 2)
             self.assertTrue((Path(tmp) / ".code-agent" / ".gitignore").is_file())
+
+    def test_trace_store_rotates_full_turns_but_keeps_total_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "code_agent.services.trace.MAX_FULL_TRACE_TURNS",
+            3,
+        ):
+            for index in range(5):
+                append_turn_trace(
+                    tmp,
+                    {
+                        "turn_id": f"turn_{index}",
+                        "thread_id": "thread_1",
+                        "user_request": f"request {index}",
+                        "tool_trace": [],
+                        "file_changes": [],
+                        "errors": [],
+                    },
+                )
+
+            trace = load_project_trace(tmp)
+
+            self.assertEqual(trace["turn_count"], 5)
+            self.assertEqual(trace["summary"]["turn_count"], 5)
+            self.assertEqual(
+                [turn["turn_id"] for turn in trace["turns"]],
+                ["turn_2", "turn_3", "turn_4"],
+            )
+            review = reviewable_project_trace(trace, recent_turns_limit=2)
+            self.assertEqual(review["turn_count"], 5)
+            self.assertEqual(review["omitted_older_turns"], 3)
+
+    def test_legacy_json_trace_is_imported_once_into_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / ".code-agent" / "traces" / "project_trace.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text(
+                '{"schema_version":1,"turn_count":1,"turns":['
+                '{"turn_id":"legacy_1","user_request":"old","tool_trace":[]}],'
+                '"summary":{"turn_count":1}}',
+                encoding="utf-8",
+            )
+
+            first = load_project_trace(tmp)
+            second = load_project_trace(tmp)
+
+            self.assertEqual(first["turn_count"], 1)
+            self.assertEqual(second["turn_count"], 1)
+            self.assertEqual(second["turns"][0]["turn_id"], "legacy_1")
+            self.assertTrue((Path(tmp) / ".code-agent" / "traces.sqlite3").is_file())
+            self.assertTrue(legacy.is_file())
 
     def test_project_trace_review_triggers_on_user_feedback(self) -> None:
         trace = {
