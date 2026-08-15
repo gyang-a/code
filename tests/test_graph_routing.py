@@ -18,6 +18,7 @@ from code_agent.services.skills import SkillInfo
 from code_agent.main import (
     _build_agent_undo_plan,
     _format_sessions,
+    _format_trace_summary,
     _is_slash_command,
     _is_model_timeout_error,
     _parse_git_status_paths_z,
@@ -38,6 +39,26 @@ from code_agent.ui.stream import (
 
 
 class GraphRoutingTests(unittest.TestCase):
+    def test_trace_summary_is_human_readable_and_bounded(self) -> None:
+        trace = {
+            "turn_count": 2,
+            "turns": [
+                {"turn_id": "turn_1", "user_request": "first", "tool_trace": [], "errors": []},
+                {
+                    "turn_id": "turn_2",
+                    "user_request": "build the project",
+                    "tool_trace": [{"tool": "shell_command"}],
+                    "errors": [{"code": "nonzero_exit"}],
+                },
+            ],
+        }
+
+        rendered = _format_trace_summary(trace, limit=1)
+
+        self.assertIn("Trace turns: 2", rendered)
+        self.assertNotIn("turn_1", rendered)
+        self.assertIn("turn_2: build the project [tools=1, errors=1]", rendered)
+
     def test_agent_defaults_include_model_timeout_and_five_tool_calls(self) -> None:
         config = AgentConfig()
 

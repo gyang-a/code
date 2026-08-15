@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -196,6 +197,14 @@ class TraceTests(unittest.TestCase):
             self.assertEqual([turn["turn_id"] for turn in second_project_trace["turns"]], ["turn_001", "turn_002"])
             self.assertEqual(load_project_trace(tmp)["turn_count"], 2)
             self.assertTrue((Path(tmp) / ".code-agent" / ".gitignore").is_file())
+            readable = Path(tmp) / ".code-agent" / "traces" / "project_trace.readable.json"
+            self.assertTrue(readable.is_file())
+            readable_data = json.loads(readable.read_text(encoding="utf-8"))
+            self.assertEqual(readable_data["turn_count"], 2)
+            self.assertEqual(
+                [turn["turn_id"] for turn in readable_data["turns"]],
+                ["turn_001", "turn_002"],
+            )
 
     def test_trace_store_rotates_full_turns_but_keeps_total_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch(

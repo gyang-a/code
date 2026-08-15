@@ -130,6 +130,15 @@ recent raw turns. The latest 100 turns retain their complete payload; older turn
 represented by the aggregate summary. Existing `.code-agent/traces/project_trace.json`
 files are imported once and retained as legacy backups.
 
+A bounded human-readable mirror is refreshed automatically at:
+
+```text
+.code-agent/traces/project_trace.readable.json
+```
+
+It contains the aggregate summary and latest 20 complete turns. Use `/trace` or
+`/trace 10` inside the CLI for a concise recent-turn view and the mirror path.
+
 ## Undo
 
 `/undo` is scoped to the latest agent turn. Each turn records the Git dirty paths that
@@ -183,6 +192,7 @@ environment variables are removed before commands start.
 /diff
 /undo
 /sessions
+/trace [n]
 /resume [thread-id]
 /help
 ```

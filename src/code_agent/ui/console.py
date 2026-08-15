@@ -47,6 +47,7 @@ def print_help() -> None:
         ("/usage", "Show local interaction and token usage."),
         ("/skills", "List saved skills; legacy pending review commands are available."),
         ("/sessions", "List saved conversation threads for this workspace."),
+        ("/trace [n]", "Show recent trace turns and the readable JSON path."),
         ("/resume [id]", "List saved threads or switch to a saved thread."),
         ("/mcp", "Reserved MCP integration entry point."),
         ("/exit", "Exit the CLI."),

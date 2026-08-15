@@ -27,8 +27,10 @@ TRACE_DIR = "traces"
 UNDO_DIR = "undo"
 PROJECT_TRACE_FILE = "project_trace.json"
 PROJECT_TRACE_DB = "traces.sqlite3"
+READABLE_TRACE_FILE = "project_trace.readable.json"
 DEFAULT_REVIEW_RECENT_TURNS = 10
 MAX_FULL_TRACE_TURNS = 100
+READABLE_TRACE_TURNS = 20
 UNDO_RECENT_TURNS = 20
 UNDO_MAX_AGE_DAYS = 30
 SUMMARY_LIST_LIMIT = 40
@@ -297,6 +299,10 @@ def legacy_project_trace_path(workspace: str | Path) -> Path:
     return trace_root(workspace) / PROJECT_TRACE_FILE
 
 
+def readable_project_trace_path(workspace: str | Path) -> Path:
+    return trace_root(workspace) / READABLE_TRACE_FILE
+
+
 def set_current_trace_recorder(recorder: Any) -> Token:
     return _CURRENT_TRACE_RECORDER.set(recorder)
 
@@ -390,6 +396,7 @@ def load_project_trace(workspace: str | Path) -> dict[str, Any]:
                     "turns": turns,
                 }
             )
+            _write_readable_trace(workspace, project_trace)
             return project_trace
     except (OSError, sqlite3.Error):
         return _new_project_trace(workspace, path)
@@ -572,6 +579,33 @@ def _prune_undo_snapshots(workspace: str | Path, project_trace: Mapping[str, Any
             shutil.rmtree(resolved)
         except (OSError, ValueError):
             continue
+
+
+def _write_readable_trace(workspace: str | Path, project_trace: Mapping[str, Any]) -> Path:
+    path = readable_project_trace_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    turns = project_trace.get("turns")
+    turn_list = turns if isinstance(turns, list) else []
+    total_turns = int(project_trace.get("turn_count") or len(turn_list))
+    readable = {
+        "schema_version": 1,
+        "generated_at": _utc_now(),
+        "source": str(project_trace_path(workspace)),
+        "turn_count": total_turns,
+        "retained_full_turns": len(turn_list),
+        "readable_turns": min(len(turn_list), READABLE_TRACE_TURNS),
+        "omitted_older_turns": max(0, total_turns - min(len(turn_list), READABLE_TRACE_TURNS)),
+        "summary": project_trace.get("summary") or _new_summary(),
+        "turns": turn_list[-READABLE_TRACE_TURNS:],
+    }
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps(readable, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="",
+    )
+    temp_path.replace(path)
+    return path
 
 
 def _set_meta(conn: sqlite3.Connection, key: str, value: Any) -> None:

@@ -476,6 +476,8 @@ def _handle_slash(command: str, session: Session) -> bool:
         _handle_resume_command(session, arg)
     elif name == "/sessions":
         _handle_sessions_command(session.workspace)
+    elif name == "/trace":
+        _handle_trace_command(session.workspace, arg)
     elif name == "/mcp":
         console.print("MCP integration is not configured in this MVP.")
     else:
@@ -521,6 +523,41 @@ def _handle_skills_command(arg: str) -> None:
 def _handle_sessions_command(workspace: str) -> None:
     records = list_sessions(workspace)
     _print_raw(_format_sessions(records))
+
+
+def _handle_trace_command(workspace: str, arg: str) -> None:
+    from code_agent.services.trace import load_project_trace, readable_project_trace_path
+
+    try:
+        limit = min(max(int(arg.strip() or "5"), 1), 20)
+    except ValueError:
+        _print_raw("Usage: /trace [1-20]")
+        return
+    trace = load_project_trace(workspace)
+    _print_raw(_format_trace_summary(trace, limit=limit))
+    _print_raw(f"Readable trace: {readable_project_trace_path(workspace)}")
+
+
+def _format_trace_summary(trace: Mapping[str, Any], *, limit: int = 5) -> str:
+    turns = trace.get("turns")
+    turn_list = turns if isinstance(turns, list) else []
+    selected = turn_list[-max(1, limit):]
+    lines = [f"Trace turns: {trace.get('turn_count', len(turn_list))}"]
+    if not selected:
+        lines.append("No trace turns recorded.")
+        return "\n".join(lines)
+    for turn in selected:
+        if not isinstance(turn, Mapping):
+            continue
+        request = " ".join(str(turn.get("user_request") or "").split())
+        tools = turn.get("tool_trace")
+        errors = turn.get("errors")
+        lines.append(
+            f"- {turn.get('turn_id') or 'unknown'}: {truncate(request, 160)} "
+            f"[tools={len(tools) if isinstance(tools, list) else 0}, "
+            f"errors={len(errors) if isinstance(errors, list) else 0}]"
+        )
+    return "\n".join(lines)
 
 
 def _handle_resume_command(session: Session, arg: str) -> None:
