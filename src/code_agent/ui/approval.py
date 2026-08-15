@@ -28,6 +28,19 @@ def format_tool_call_summary(
 
 
 def _action_detail(tool_name: str, args: Mapping[str, Any]) -> str | None:
+    if tool_name == "shell_command":
+        command = _single_line(args.get("command"))
+        justification = _single_line(args.get("justification"))
+        if args.get("sandbox_permissions") == "danger-full-access":
+            command = (
+                f"[UNRESTRICTED WINDOWS PROCESS] {command}"
+                if command
+                else "[UNRESTRICTED WINDOWS PROCESS]"
+            )
+        if command and justification:
+            return f"{command} — {justification}"
+        return command or justification or None
+
     path = args.get("path")
     if path:
         return _single_line(path)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 
 class ListFilesInput(BaseModel):
@@ -57,6 +59,49 @@ class GitDiffInput(BaseModel):
 
 class GitStatusInput(BaseModel):
     pass
+
+
+class ShellCommandInput(BaseModel):
+    command: str = Field(
+        min_length=1,
+        description=(
+            "PowerShell command executed by a fresh `pwsh -Command` process in the Windows sandbox. "
+            "Use workdir instead of cd and `$env:NAME` for environment variables."
+        ),
+    )
+    description: str = Field(
+        min_length=1,
+        description="Short user-facing description of what the command does.",
+    )
+    workdir: str = Field(
+        default=".",
+        description="Working directory inside the current project folder.",
+    )
+    timeout_ms: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional timeout in milliseconds; the host applies a configured cap.",
+    )
+    sandbox_permissions: Literal["workspace-write", "danger-full-access"] | None = Field(
+        default=None,
+        description=(
+            "Request a one-shot escalation. workspace-write is valid only after an exact "
+            "read-only file denial. danger-full-access is valid only after an exact process-pipe "
+            "denial and runs with the user's normal Windows file permissions. Both require approval."
+        ),
+    )
+    justification: str | None = Field(
+        default=None,
+        description="One sentence explaining why this exact command needs the requested access.",
+    )
+
+    @model_validator(mode="after")
+    def validate_escalation_pair(self):
+        permission_set = self.sandbox_permissions is not None
+        justification_set = bool(self.justification and self.justification.strip())
+        if permission_set != justification_set:
+            raise ValueError("sandbox_permissions and a non-empty justification must be provided together")
+        return self
 
 
 class SkillsListInput(BaseModel):

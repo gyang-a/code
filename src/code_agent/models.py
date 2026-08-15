@@ -12,6 +12,12 @@ class RiskLevel(str, Enum):
     level_3 = "level_3"
 
 
+class SandboxMode(str, Enum):
+    read_only = "read-only"
+    workspace_write = "workspace-write"
+    danger_full_access = "danger-full-access"
+
+
 class PermissionDecision(BaseModel):
     risk: RiskLevel
     allowed: bool

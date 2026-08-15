@@ -15,9 +15,12 @@ class PromptTests(unittest.TestCase):
     def test_prompt_does_not_suggest_absolute_workspace_path(self) -> None:
         self.assertNotIn("/workspace", SYSTEM_PROMPT)
         self.assertIn("current project folder", SYSTEM_PROMPT)
-        self.assertIn("Command execution is not available", SYSTEM_PROMPT)
-        self.assertIn("Do not claim to run tests", SYSTEM_PROMPT)
-        self.assertIn("exact command the user can run locally", SYSTEM_PROMPT)
+        self.assertIn("Use shell_command", SYSTEM_PROMPT)
+        self.assertIn("read-only restricted token", SYSTEM_PROMPT)
+        self.assertIn("exact same command and workdir", SYSTEM_PROMPT)
+        self.assertIn("process-pipe denial", SYSTEM_PROMPT)
+        self.assertIn("danger-full-access", SYSTEM_PROMPT)
+        self.assertIn("npm` versus `npm.cmd", SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

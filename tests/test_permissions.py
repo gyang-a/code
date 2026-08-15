@@ -69,6 +69,57 @@ class PermissionTests(unittest.TestCase):
             self.assertEqual(decision.risk, RiskLevel.level_2)
             self.assertTrue(decision.requires_approval)
 
+    def test_read_only_shell_is_level_0(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision = classify_tool_call(
+                workspace,
+                "shell_command",
+                {"command": "Get-ChildItem", "workdir": "."},
+            )
+
+            self.assertEqual(decision.risk, RiskLevel.level_0)
+            self.assertTrue(decision.allowed)
+            self.assertFalse(decision.requires_approval)
+
+    def test_workspace_write_shell_requires_approval(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision = classify_tool_call(
+                workspace,
+                "shell_command",
+                {
+                    "command": "pytest",
+                    "workdir": ".",
+                    "sandbox_permissions": "workspace-write",
+                    "justification": "Tests create cache files.",
+                },
+            )
+
+            self.assertEqual(decision.risk, RiskLevel.level_2)
+            self.assertTrue(decision.requires_approval)
+
+    def test_danger_full_access_shell_requires_approval_and_warns(self) -> None:
+        with TemporaryWorkspace() as tmp_path:
+            workspace = Workspace(tmp_path)
+
+            decision = classify_tool_call(
+                workspace,
+                "shell_command",
+                {
+                    "command": "npm run build",
+                    "workdir": ".",
+                    "sandbox_permissions": "danger-full-access",
+                    "justification": "Vite requires pipe-based child processes.",
+                },
+            )
+
+            self.assertEqual(decision.risk, RiskLevel.level_2)
+            self.assertTrue(decision.requires_approval)
+            self.assertIn("anywhere accessible to the current user", decision.reason)
+
 
 class TemporaryWorkspace:
     def __enter__(self) -> Path:

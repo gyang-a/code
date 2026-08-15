@@ -53,9 +53,11 @@ def build_turn_metadata(workspace: Workspace, *, max_entries: int = 25) -> str:
         "- Use patch_file for normal edits; avoid full-file rewrites.",
         "- Use create_file only for genuinely new files.",
         "- Use git_status/git_diff to inspect changes.",
-        "- Command execution is not available to the agent.",
-        "- Do not claim to run tests, builds, package installs, scaffolding, or dev servers.",
-        "- If validation would be useful, include the exact command the user can run locally in the final answer.",
+        "- Use shell_command for Windows PowerShell commands; it defaults to read-only sandboxing.",
+        "- Inspect denied, timeout, and exit-code markers before reporting command results.",
+        "- Request workspace-write only as an exact retry after a real read-only denial.",
+        "- Each shell call is fresh; controlled modes use ConstrainedLanguage, while approved danger-full-access uses the normal Windows mode.",
+        "- A process-pipe denial permits one exact danger-full-access retry with separate user approval.",
         "",
         "Command policy:",
         *_format_command_policy(workspace),
@@ -119,8 +121,8 @@ def _format_command_policy(workspace: Workspace) -> list[str]:
 
     if policy is None:
         return [
-            "- command execution: unavailable to the agent",
-            "- validation: suggest exact commands for the user to run locally",
+            "- command execution: Windows PowerShell in the read-only restricted-token sandbox",
+            "- workspace writes: exact denied-command retry with user approval",
         ]
 
     lines: list[str] = []

@@ -25,7 +25,12 @@ from code_agent.main import (
 )
 from code_agent.services.persistence import SessionRecord
 from code_agent.services.workspace import Workspace
-from code_agent.ui.stream import _format_todos, _should_render_update, _tool_result_summary
+from code_agent.ui.stream import (
+    _format_todos,
+    _should_render_update,
+    _tool_result_summary,
+    render_stream_chunk,
+)
 
 
 class GraphRoutingTests(unittest.TestCase):
@@ -218,6 +223,35 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertFalse(_should_render_update("ModelCallLimitMiddleware.after_model", {}))
         self.assertTrue(_should_render_update("model", {"messages": ["x"]}))
 
+    def test_stream_hides_middleware_pass_through_messages(self) -> None:
+        self.assertFalse(
+            _should_render_update(
+                "SummarizationMiddleware.before_model",
+                {"messages": ["pass-through"]},
+            )
+        )
+
+    def test_stream_renderer_never_prints_middleware_lifecycle_nodes(self) -> None:
+        with patch("code_agent.ui.stream.console.print") as print_mock:
+            render_stream_chunk(
+                {
+                    "HumanInTheLoopMiddleware.after_model": {
+                        "messages": ["pass-through"]
+                    },
+                    "TodoListMiddleware.after_model": {
+                        "todos": [{"content": "hidden lifecycle", "status": "pending"}]
+                    },
+                }
+            )
+
+        print_mock.assert_not_called()
+        self.assertFalse(
+            _should_render_update(
+                "HumanInTheLoopMiddleware.after_model",
+                {"messages": ["pass-through"]},
+            )
+        )
+
     def test_stream_renders_todo_updates(self) -> None:
         self.assertTrue(
             _should_render_update(
@@ -237,7 +271,7 @@ class GraphRoutingTests(unittest.TestCase):
 
         self.assertEqual(lines, ["[x] Inspect", "[>] Patch", "[ ] Verify"])
 
-    def test_agent_toolset_does_not_expose_command_execution(self) -> None:
+    def test_agent_toolset_exposes_windows_sandboxed_command_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tools = build_tools(Workspace(tmp))
             tool_names = {tool.name for tool in tools}
@@ -257,6 +291,7 @@ class GraphRoutingTests(unittest.TestCase):
                 "skill_view",
                 "git_status",
                 "git_diff",
+                "shell_command",
             },
         )
 
@@ -293,6 +328,27 @@ class GraphRoutingTests(unittest.TestCase):
                     None,
                 ),
             )
+            self.assertFalse(
+                config["shell_command"]["when"](
+                    FakeToolCallRequest(
+                        "shell_command",
+                        {"command": "Get-ChildItem", "description": "List files"},
+                    )
+                )
+            )
+            self.assertTrue(
+                config["shell_command"]["when"](
+                    FakeToolCallRequest(
+                        "shell_command",
+                        {
+                            "command": "pytest",
+                            "description": "Run tests",
+                            "sandbox_permissions": "workspace-write",
+                            "justification": "Tests create cache files.",
+                        },
+                    )
+                )
+            )
 
     def test_runtime_metadata_middleware_injects_system_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,7 +369,8 @@ class GraphRoutingTests(unittest.TestCase):
 
         self.assertIn("base", content)
         self.assertIn("Runtime metadata:", content)
-        self.assertIn("Command execution: unavailable to the agent.", content)
+        self.assertIn("Command execution: use shell_command", content)
+        self.assertIn("restricted-token sandbox", content)
 
     def test_runtime_metadata_injects_global_skill_index_and_loading_rule(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -32,6 +32,8 @@ def render_stream_chunk(chunk: Mapping[str, Any]) -> None:
         return
 
     for node_name, update in chunk.items():
+        if _is_internal_middleware_node(node_name):
+            continue
         if not _should_render_update(node_name, update):
             continue
         label = NODE_LABELS.get(node_name, node_name)
@@ -85,16 +87,26 @@ def _render_node_update(update: Mapping[str, Any]) -> None:
 
 
 def _should_render_update(node_name: str, update: Any) -> bool:
+    if _is_internal_middleware_node(node_name):
+        return False
     if not isinstance(update, Mapping):
         return True
     if not update:
         return False
+    # LangGraph middleware lifecycle nodes often carry pass-through messages,
+    # which made them look like meaningful user-facing updates on every model
+    # call. Actual interrupts are handled separately via ``__interrupt__`` and
+    # todo/tool/model updates have their own nodes, so keep lifecycle plumbing
+    # out of the transcript even when its update contains messages.
     renderable_keys = {"messages", "final_answer", "todos"}
     if any(update.get(key) for key in renderable_keys):
         return True
-    if ".before_" in node_name or ".after_" in node_name:
-        return False
     return False
+
+
+def _is_internal_middleware_node(node_name: str) -> bool:
+    normalized = str(node_name)
+    return "Middleware.before_" in normalized or "Middleware.after_" in normalized
 
 
 def _render_todos(todos: Any) -> None:

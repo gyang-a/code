@@ -118,7 +118,36 @@ undo removes only those paths.
 
 ## Tools
 
-The model can call bounded filesystem, search, git, and skill tools. `read_file` returns a limited text window by default; the agent must request later `start_line` values to continue reading. Command execution is not available to the agent; if validation is useful, the final answer should suggest exact commands for the user to run locally.
+The model can call bounded filesystem, search, git, skill, and Windows PowerShell tools.
+`read_file` returns a limited text window by default; the agent must request later
+`start_line` values to continue reading.
+
+`shell_command` runs PowerShell with a Windows `WRITE_RESTRICTED` token. The default
+`read-only` mode has no workspace write capability. If Windows reports a denied write,
+the model may retry the exact same command and working directory with
+`sandbox_permissions="workspace-write"` and a justification. That retry pauses for user
+approval and grants workspace write access for that execution only. Sandbox setup
+failures are fail-closed and never fall back to an unrestricted subprocess.
+Capability ACEs are deterministic and remain on the workspace as an inert cache; a
+process can use them only while its restricted token carries the matching SID. The
+per-command temporary directory and its capability disappear after execution.
+
+Every shell call starts a fresh `pwsh -Command` process, so PowerShell state does
+not persist; callers use `workdir` rather than `cd`. Read-only and workspace-write
+executions run in ConstrainedLanguage mode on the supported Windows backend. Prefer
+cmdlets and core types in those modes. Approved danger-full-access uses the caller's
+normal PowerShell language mode. Child-process output capture through named-pipe stdio can fail as
+`spawn EPERM`; this is reported as a `process-pipe` denial. The exact command then
+becomes eligible for one `danger-full-access` retry with a separate user approval.
+That final mode uses the caller's normal Windows token, so Node/Vite/esbuild can create
+pipe-based child processes, but the command can also access anything the current user
+can access. It is never available speculatively and cannot be used with a changed alias,
+wrapper, or command spelling.
+
+The Windows ACL backend reports partial enforcement: Windows objects writable by
+Everyone and NTFS hard-link aliases are platform limitations, and read access, network,
+and process visibility are outside this write sandbox. Sensitive credential-like
+environment variables are removed before commands start.
 
 ## Useful Commands
 

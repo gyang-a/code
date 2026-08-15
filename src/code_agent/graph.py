@@ -34,6 +34,7 @@ from code_agent.tools import (
     build_patch_file_tool,
     build_read_file_tool,
     build_search_text_tool,
+    build_shell_command_tool,
     build_skill_view_tool,
     build_skills_list_tool,
     build_write_file_tool,
@@ -45,6 +46,9 @@ def build_tools(
     *,
     read_max_lines: int | None = None,
     tool_output_limit: int | None = None,
+    shell_timeout_ms: int = 10_000,
+    shell_max_timeout_ms: int = 120_000,
+    shell_output_limit: int = 12_000,
 ):
     return [
         build_list_files_tool(workspace),
@@ -63,6 +67,12 @@ def build_tools(
         build_skill_view_tool(workspace),
         build_git_status_tool(workspace),
         build_git_diff_tool(workspace),
+        build_shell_command_tool(
+            workspace,
+            default_timeout_ms=shell_timeout_ms,
+            max_timeout_ms=shell_max_timeout_ms,
+            output_limit=shell_output_limit,
+        ),
     ]
 
 
@@ -78,6 +88,9 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
         workspace,
         read_max_lines=agent_config.file_read_max_lines,
         tool_output_limit=agent_config.tool_output_limit,
+        shell_timeout_ms=agent_config.shell_timeout_ms,
+        shell_max_timeout_ms=agent_config.shell_max_timeout_ms,
+        shell_output_limit=agent_config.shell_output_limit,
     )
     llm_kwargs = {"temperature": 0}
     if agent_config.api_key:
@@ -148,7 +161,14 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
             "- Compare the current user request with the available global skills before taking action.\n"
             "- If a listed skill is relevant, call skill_view for that skill before inspecting or editing project files.\n"
             "- If no listed skill is relevant, continue without calling skill_view.\n\n"
-            "Command execution: unavailable to the agent.\n"
+            "Command execution: use shell_command. It runs PowerShell under the Windows read-only "
+            "restricted-token sandbox by default. If and only if a real result reports denied=true, "
+            "retry the exact same command and workdir with sandbox_permissions='workspace-write' "
+            "and a one-sentence justification; the host will request user approval. Never request "
+            "workspace-write speculatively or work around a rejected escalation. Each call is a fresh "
+            "PowerShell process; controlled modes use ConstrainedLanguage and workdir replaces cd. A process-pipe denial "
+            "such as spawn EPERM permits one exact retry with sandbox_permissions='danger-full-access' "
+            "and separate approval. Never request it speculatively or change the command spelling.\n"
             f"Tool call budget hint: prefer at most {self.max_tool_calls_per_turn} tool calls per model turn."
         )
         return handler(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import uuid
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
@@ -24,6 +25,7 @@ PROJECT_TRACE_FILE = "project_trace.json"
 DEFAULT_REVIEW_RECENT_TURNS = 10
 SUMMARY_LIST_LIMIT = 40
 WRITE_TOOL_NAMES = {"patch_file", "create_file", "write_file", "delete_file"}
+SNAPSHOT_TOOL_NAMES = WRITE_TOOL_NAMES | {"shell_command"}
 VALIDATION_TOOL_NAMES = {"git_status", "git_diff"}
 SENSITIVE_KEY_RE = re.compile(r"(api[_-]?key|token|secret|password|passwd|credential)", re.I)
 FEEDBACK_RE = re.compile(
@@ -51,9 +53,10 @@ class TurnTraceRecorder:
         self._seen_tool_results: set[str] = set()
         self.undo_snapshots: list[dict[str, Any]] = []
         self._snapshot_paths: set[str] = set()
+        self.shell_file_changes: list[dict[str, Any]] = []
 
     def capture_write_snapshot(self, tool_name: str, path: str) -> None:
-        if tool_name not in WRITE_TOOL_NAMES:
+        if tool_name not in SNAPSHOT_TOOL_NAMES:
             return
 
         rel_path = _normalize_workspace_path(self.workspace, path)
@@ -94,6 +97,42 @@ class TurnTraceRecorder:
                 "created_at": _utc_now(),
             }
         )
+
+    def capture_workspace_write_snapshots(self, tool_name: str) -> None:
+        """Protect user-dirty files before a command gains workspace write access."""
+        if tool_name != "shell_command":
+            return
+        for path in self.git_baseline_dirty_paths:
+            normalized = _normalize_path(str(path))
+            if not normalized:
+                continue
+            target = self.workspace / normalized
+            if target.exists() and not target.is_file():
+                continue
+            self.capture_write_snapshot(tool_name, normalized)
+
+    def record_shell_file_changes(self) -> None:
+        current = _git_status_changes(self.workspace)
+        current_paths = {change["path"] for change in current}
+        baseline_paths = {
+            _normalize_path(str(path))
+            for path in self.git_baseline_dirty_paths
+            if str(path)
+        }
+        for missing_path in sorted(baseline_paths - current_paths):
+            current.append({"path": missing_path, "operation": "shell"})
+
+        existing = {str(change.get("path") or "") for change in self.shell_file_changes}
+        for change in current:
+            if change["path"] in existing:
+                continue
+            self.shell_file_changes.append(
+                {
+                    **change,
+                    "call_id": None,
+                }
+            )
+            existing.add(change["path"])
 
     def record_chunk(self, chunk: Mapping[str, Any]) -> None:
         if "__interrupt__" in chunk:
@@ -184,7 +223,7 @@ class TurnTraceRecorder:
         existing_skills: list[SkillInfo],
         user_feedback: str = "",
     ) -> dict[str, Any]:
-        file_changes = _file_changes_from_steps(self.tool_trace)
+        file_changes = _file_changes_from_steps(self.tool_trace) + list(self.shell_file_changes)
         errors = _errors_from_steps(self.tool_trace)
         return {
             "turn_id": self.turn_id,
@@ -254,6 +293,18 @@ def capture_current_write_snapshot(tool_name: str, path: str) -> None:
     recorder = _CURRENT_TRACE_RECORDER.get()
     if recorder is not None:
         recorder.capture_write_snapshot(tool_name, path)
+
+
+def capture_current_workspace_write_snapshots(tool_name: str) -> None:
+    recorder = _CURRENT_TRACE_RECORDER.get()
+    if recorder is not None:
+        recorder.capture_workspace_write_snapshots(tool_name)
+
+
+def record_current_shell_file_changes() -> None:
+    recorder = _CURRENT_TRACE_RECORDER.get()
+    if recorder is not None:
+        recorder.record_shell_file_changes()
 
 
 def append_turn_trace(workspace: str | Path, turn_trace: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
@@ -582,6 +633,41 @@ def _file_changes_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]
                 "call_id": step.get("call_id"),
             }
         )
+    return changes
+
+
+def _git_status_changes(workspace: Path) -> list[dict[str, str]]:
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--", "."],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            shell=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+
+    records = [record for record in result.stdout.split("\0") if record]
+    changes: list[dict[str, str]] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        status = record[:2]
+        path = _normalize_path(record[3:] if len(record) > 3 else "")
+        if path:
+            changes.append(
+                {
+                    "path": path,
+                    "operation": "create" if status == "??" else "shell",
+                }
+            )
+        index += 2 if "R" in status or "C" in status else 1
     return changes
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -81,6 +82,55 @@ class TraceTests(unittest.TestCase):
             self.assertEqual(snapshot["path"], "src/app.py")
             snapshot_path = Path(tmp) / snapshot["snapshot_path"]
             self.assertEqual(snapshot_path.read_text(encoding="utf-8"), "user version\n")
+
+    def test_shell_workspace_write_tracks_concrete_paths_for_safe_undo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = root / "src" / "app.py"
+            tracked.parent.mkdir(parents=True)
+            tracked.write_text("baseline\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "src/app.py"], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "baseline",
+                ],
+                cwd=root,
+                check=True,
+            )
+            tracked.write_text("user version\n", encoding="utf-8")
+            recorder = TurnTraceRecorder(
+                workspace=root,
+                thread_id="thread_1",
+                user_request="run formatter",
+                git_baseline_dirty_paths=["src/app.py"],
+                turn_id="turn_shell",
+            )
+
+            recorder.capture_workspace_write_snapshots("shell_command")
+            tracked.write_text("shell version\n", encoding="utf-8")
+            (root / "generated.txt").write_text("new\n", encoding="utf-8")
+            recorder.record_shell_file_changes()
+            trace = recorder.build_trace(final_answer="done", existing_skills=[])
+
+            self.assertEqual(
+                {(change["path"], change["operation"]) for change in trace["file_changes"]},
+                {("src/app.py", "shell"), ("generated.txt", "create")},
+            )
+            self.assertNotIn(".", {change["path"] for change in trace["file_changes"]})
+            snapshot = trace["undo_snapshots"][0]
+            self.assertEqual(snapshot["path"], "src/app.py")
+            self.assertEqual(
+                (root / snapshot["snapshot_path"]).read_text(encoding="utf-8"),
+                "user version\n",
+            )
 
     def test_turn_trace_records_interrupt_action_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
