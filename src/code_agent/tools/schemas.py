@@ -85,9 +85,11 @@ class ShellCommandInput(BaseModel):
     sandbox_permissions: Literal["workspace-write", "danger-full-access"] | None = Field(
         default=None,
         description=(
-            "Request a one-shot escalation. workspace-write is valid only after an exact "
-            "read-only file denial. danger-full-access is valid only after an exact process-pipe "
-            "denial and runs with the user's normal Windows file permissions. Both require approval."
+            "Request a one-shot escalation after an exact real denial. A read-only file denial "
+            "permits workspace-write or direct danger-full-access; use direct full access for package "
+            "managers that need external runtimes/caches. A process-pipe or workspace-write denial "
+            "permits danger-full-access, which runs with "
+            "the user's normal Windows file permissions. Both require approval."
         ),
     )
     justification: str | None = Field(

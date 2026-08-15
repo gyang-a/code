@@ -26,12 +26,22 @@ class ShellDenialRegistry:
     """Remember the exact command and next escalation allowed by a real denial."""
 
     def __init__(self) -> None:
-        self._latest: tuple[str, str, float] | None = None
+        self._latest: tuple[str, frozenset[str], float] | None = None
         self._lock = threading.Lock()
 
-    def remember(self, command: str, workdir: Path, permission: str) -> None:
+    def remember(
+        self,
+        command: str,
+        workdir: Path,
+        permissions: str | set[str] | frozenset[str],
+    ) -> None:
+        allowed = (
+            frozenset({permissions})
+            if isinstance(permissions, str)
+            else frozenset(permissions)
+        )
         with self._lock:
-            self._latest = (_fingerprint(command, workdir), permission, time.monotonic())
+            self._latest = (_fingerprint(command, workdir), allowed, time.monotonic())
 
     def consume(self, command: str, workdir: Path, permission: str) -> bool:
         fingerprint = _fingerprint(command, workdir)
@@ -39,15 +49,27 @@ class ShellDenialRegistry:
             latest = self._latest
             if latest is None:
                 return False
-            latest_fingerprint, allowed_permission, created_at = latest
+            latest_fingerprint, allowed_permissions, created_at = latest
             valid = (
                 latest_fingerprint == fingerprint
-                and allowed_permission == permission
+                and permission in allowed_permissions
                 and time.monotonic() - created_at <= 300
             )
             if valid or time.monotonic() - created_at > 300:
                 self._latest = None
             return valid
+
+    def eligible(self, command: str, workdir: Path, permission: str) -> bool:
+        fingerprint = _fingerprint(command, workdir)
+        with self._lock:
+            latest = self._latest
+            if latest is None:
+                return False
+            latest_fingerprint, allowed_permissions, created_at = latest
+            if time.monotonic() - created_at > 300:
+                self._latest = None
+                return False
+            return latest_fingerprint == fingerprint and permission in allowed_permissions
 
 
 def build_shell_command_tool(
@@ -84,11 +106,12 @@ def build_shell_command_tool(
         core types; Add-Type, COM, reflection, and non-core .NET static calls may
         fail. Restricted processes cannot capture child-process output through
         named-pipe stdio: Node.js spawn/exec with `stdio: 'pipe'` may fail with
-        `spawn EPERM`. After a real process-pipe denial, retry the exact same
-        command once with `sandbox_permissions='danger-full-access'`. This
-        requires separate user approval and runs with the user's normal Windows
-        file permissions so tools such as Vite/esbuild can start pipe-based
-        child processes. Never request it speculatively or change the command.
+        `spawn EPERM`. After any real workspace-write denial, or a process-pipe
+        denial in read-only mode, retry the exact same command once with
+        `sandbox_permissions='danger-full-access'`. This requires separate user
+        approval and runs with the user's normal Windows file permissions so
+        external runtimes, caches, and pipe-based build tools can work. Never
+        request it speculatively or change the command.
 
         Calls default to read-only. Attempt the command and inspect its sandbox
         marker rather than predicting denial. If a real file-access denial occurs
@@ -134,8 +157,18 @@ def build_shell_command_tool(
                 mode == SandboxMode.read_only
                 and result.denial_kind == "file-access"
             ):
-                registry.remember(command, resolved_workdir, SandboxMode.workspace_write.value)
-            elif result.denial_kind == "process-pipe":
+                registry.remember(
+                    command,
+                    resolved_workdir,
+                    {
+                        SandboxMode.workspace_write.value,
+                        SandboxMode.danger_full_access.value,
+                    },
+                )
+            elif (
+                result.sandbox_denied
+                and mode == SandboxMode.workspace_write
+            ) or result.denial_kind == "process-pipe":
                 registry.remember(command, resolved_workdir, SandboxMode.danger_full_access.value)
 
             return _render_result(result, output_limit=output_limit)
@@ -144,6 +177,24 @@ def build_shell_command_tool(
         except SandboxUnavailableError as exc:
             return f"ERROR: SANDBOX_UNAVAILABLE: {exc}"
 
+    def approval_eligible(args: dict) -> bool:
+        permission = str(args.get("sandbox_permissions") or "")
+        command = str(args.get("command") or "")
+        workdir = str(args.get("workdir") or ".")
+        if permission not in {
+            SandboxMode.workspace_write.value,
+            SandboxMode.danger_full_access.value,
+        }:
+            return True
+        try:
+            resolved_workdir = workspace.resolve(workdir)
+        except WorkspaceError:
+            return False
+        return registry.eligible(command, resolved_workdir, permission)
+
+    # The approval middleware runs before the tool. Expose a read-only preflight
+    # so it does not ask the user to approve a request the registry must reject.
+    object.__setattr__(shell_command, "_approval_eligible", approval_eligible)
     return shell_command
 
 
@@ -179,8 +230,16 @@ def _render_result(result, *, output_limit: int) -> str:
         and result.mode == SandboxMode.read_only
     ):
         lines.append(
-            "The sandbox blocked a write. Retry this exact command once with "
-            "sandbox_permissions='workspace-write' and a justification if the write is necessary."
+            "The sandbox blocked file access. Retry this exact command with "
+            "sandbox_permissions='workspace-write' for workspace-local writes. For dependency/package "
+            "manager commands that require external runtimes or caches, request "
+            "sandbox_permissions='danger-full-access' directly. Either choice requires approval."
+        )
+    elif result.sandbox_denied and result.mode == SandboxMode.workspace_write:
+        lines.append(
+            "The workspace sandbox still blocked file or process access outside its boundary. "
+            "Retry this exact command once with sandbox_permissions='danger-full-access' and a "
+            "justification. That approval uses the current user's normal Windows permissions."
         )
     elif result.denial_kind == "process-pipe":
         lines.append(

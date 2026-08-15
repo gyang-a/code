@@ -44,7 +44,7 @@ class MemoryTests(unittest.TestCase):
             self.assertIn("current_folder_name:", metadata)
             self.assertIn("top_level_visible_entries:", metadata)
             self.assertIn("Use shell_command for Windows PowerShell commands", metadata)
-            self.assertIn("exact retry after a real read-only denial", metadata)
+            self.assertIn("direct danger-full-access for package managers", metadata)
             self.assertIn("Broad triage budget", metadata)
             self.assertIn("at most 6 file reads or 12 total tool calls", metadata)
             self.assertIn("... truncated ...", metadata)

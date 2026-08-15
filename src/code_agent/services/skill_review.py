@@ -39,7 +39,10 @@ def review_trace_for_skills(
         skill_index=format_skill_index(store.list_skills()),
     )
 
-    llm_kwargs: dict[str, Any] = {"temperature": 0}
+    llm_kwargs: dict[str, Any] = {
+        "temperature": 0,
+        "timeout": config.model_timeout_seconds,
+    }
     if config.api_key:
         llm_kwargs["api_key"] = config.api_key
     llm = init_chat_model(config.model, model_provider="deepseek", **llm_kwargs)

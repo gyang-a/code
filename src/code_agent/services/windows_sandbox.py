@@ -37,7 +37,6 @@ SENSITIVE_ENV_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 class SandboxUnavailableError(RuntimeError):
     pass
 
@@ -350,7 +349,8 @@ def _sanitized_environment(temp_dir: Path) -> dict[str, str]:
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.upper().startswith("DSH_") and not SENSITIVE_ENV_RE.search(key)
+        if not key.upper().startswith("DSH_")
+        and not SENSITIVE_ENV_RE.search(key)
     }
     environment["TEMP"] = str(temp_dir)
     environment["TMP"] = str(temp_dir)

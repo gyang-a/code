@@ -13,11 +13,13 @@ from code_agent.graph import (
     _approval_interrupt_config,
     build_tools,
 )
+from code_agent.config import AgentConfig
 from code_agent.services.skills import SkillInfo
 from code_agent.main import (
     _build_agent_undo_plan,
     _format_sessions,
     _is_slash_command,
+    _is_model_timeout_error,
     _parse_git_status_paths_z,
     _parse_undo_args,
     _print_raw,
@@ -26,14 +28,51 @@ from code_agent.main import (
 from code_agent.services.persistence import SessionRecord
 from code_agent.services.workspace import Workspace
 from code_agent.ui.stream import (
+    ModelWaitIndicator,
     _format_todos,
     _should_render_update,
     _tool_result_summary,
+    chunk_begins_model_wait,
     render_stream_chunk,
 )
 
 
 class GraphRoutingTests(unittest.TestCase):
+    def test_agent_defaults_include_model_timeout_and_five_tool_calls(self) -> None:
+        config = AgentConfig()
+
+        self.assertEqual(config.model_timeout_seconds, 120.0)
+        self.assertEqual(config.max_tool_calls_per_turn, 5)
+
+    def test_model_timeout_detection_handles_wrapped_client_errors(self) -> None:
+        class APITimeoutError(RuntimeError):
+            pass
+
+        wrapper = RuntimeError("request failed")
+        wrapper.__cause__ = APITimeoutError("upstream stalled")
+
+        self.assertTrue(_is_model_timeout_error(wrapper))
+        self.assertFalse(_is_model_timeout_error(RuntimeError("bad request")))
+
+    def test_model_wait_indicator_tracks_before_model_lifecycle(self) -> None:
+        self.assertTrue(
+            chunk_begins_model_wait({"SummarizationMiddleware.before_model": {}})
+        )
+        self.assertFalse(chunk_begins_model_wait({"tools": {"messages": []}}))
+
+        with patch("code_agent.ui.stream.Progress") as progress_factory:
+            progress = progress_factory.return_value
+            indicator = ModelWaitIndicator()
+            indicator.start()
+            indicator.start()
+            indicator.stop()
+            indicator.stop()
+
+        progress_factory.assert_called_once()
+        progress.add_task.assert_called_once_with("model-wait", total=None)
+        progress.start.assert_called_once()
+        progress.stop.assert_called_once()
+
     def test_slash_commands_are_identified_before_graph_execution(self) -> None:
         self.assertTrue(_is_slash_command("/help"))
         self.assertTrue(_is_slash_command("  /diff"))
@@ -336,6 +375,23 @@ class GraphRoutingTests(unittest.TestCase):
                     )
                 )
             )
+            # An escalation without a matching real denial is rejected by the
+            # tool directly and must not show a misleading approval prompt.
+            self.assertFalse(
+                config["shell_command"]["when"](
+                    FakeToolCallRequest(
+                        "shell_command",
+                        {
+                            "command": "pytest",
+                            "description": "Run tests",
+                            "sandbox_permissions": "workspace-write",
+                            "justification": "Tests create cache files.",
+                        },
+                    )
+                )
+            )
+            shell_tool = next(tool for tool in tools if tool.name == "shell_command")
+            object.__setattr__(shell_tool, "_approval_eligible", lambda args: True)
             self.assertTrue(
                 config["shell_command"]["when"](
                     FakeToolCallRequest(
@@ -408,3 +464,4 @@ class GraphRoutingTests(unittest.TestCase):
 class FakeToolCallRequest:
     def __init__(self, name: str, args: dict) -> None:
         self.tool_call = {"name": name, "args": args, "id": "call_1"}
+    chunk_begins_model_wait,

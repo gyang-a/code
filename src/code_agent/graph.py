@@ -92,7 +92,10 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
         shell_max_timeout_ms=agent_config.shell_max_timeout_ms,
         shell_output_limit=agent_config.shell_output_limit,
     )
-    llm_kwargs = {"temperature": 0}
+    llm_kwargs = {
+        "temperature": 0,
+        "timeout": agent_config.model_timeout_seconds,
+    }
     if agent_config.api_key:
         llm_kwargs["api_key"] = agent_config.api_key
     llm = init_chat_model(agent_config.model, model_provider="deepseek", **llm_kwargs)
@@ -162,12 +165,12 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
             "- If a listed skill is relevant, call skill_view for that skill before inspecting or editing project files.\n"
             "- If no listed skill is relevant, continue without calling skill_view.\n\n"
             "Command execution: use shell_command. It runs PowerShell under the Windows read-only "
-            "restricted-token sandbox by default. If and only if a real result reports denied=true, "
-            "retry the exact same command and workdir with sandbox_permissions='workspace-write' "
-            "and a one-sentence justification; the host will request user approval. Never request "
+            "restricted-token sandbox by default. After a real read-only file denial, use workspace-write "
+            "for local writes, but use direct danger-full-access for package managers such as npm install or uv add "
+            "that need external runtimes/caches. Retry the exact command with a justification. Never request "
             "workspace-write speculatively or work around a rejected escalation. Each call is a fresh "
-            "PowerShell process; controlled modes use ConstrainedLanguage and workdir replaces cd. A process-pipe denial "
-            "such as spawn EPERM permits one exact retry with sandbox_permissions='danger-full-access' "
+            "PowerShell process; controlled modes use ConstrainedLanguage and workdir replaces cd. Any workspace-write "
+            "denial, or a read-only process-pipe denial such as spawn EPERM, permits one exact retry with sandbox_permissions='danger-full-access' "
             "and separate approval. Never request it speculatively or change the command spelling.\n"
             f"Tool call budget hint: prefer at most {self.max_tool_calls_per_turn} tool calls per model turn."
         )
@@ -182,21 +185,25 @@ def _approval_interrupt_config(workspace: Workspace, tools: list) -> dict[str, d
     return {
         tool.name: {
             "allowed_decisions": ["approve", "edit", "reject", "respond"],
-            "when": _approval_required(workspace),
+            "when": _approval_required(workspace, tool),
             "description": _approval_description(workspace),
         }
         for tool in tools
     }
 
 
-def _approval_required(workspace: Workspace):
+def _approval_required(workspace: Workspace, tool=None):
     def when(request) -> bool:
         tool_call = request.tool_call
+        args = dict(tool_call.get("args") or {})
         decision = classify_tool_call(
             workspace,
             str(tool_call.get("name") or ""),
-            dict(tool_call.get("args") or {}),
+            args,
         )
+        eligibility_check = getattr(tool, "_approval_eligible", None)
+        if decision.requires_approval and callable(eligibility_check):
+            return bool(eligibility_check(args))
         return bool(decision.requires_approval)
 
     return when

@@ -123,10 +123,11 @@ The model can call bounded filesystem, search, git, skill, and Windows PowerShel
 `start_line` values to continue reading.
 
 `shell_command` runs PowerShell with a Windows `WRITE_RESTRICTED` token. The default
-`read-only` mode has no workspace write capability. If Windows reports a denied write,
-the model may retry the exact same command and working directory with
-`sandbox_permissions="workspace-write"` and a justification. That retry pauses for user
-approval and grants workspace write access for that execution only. Sandbox setup
+`read-only` mode has no workspace write capability. After a real file denial, normal
+workspace-local commands may retry with `sandbox_permissions="workspace-write"`.
+Dependency/package-manager commands such as `npm install` and `uv add` may instead
+request `danger-full-access` directly because their runtimes and caches commonly live
+outside the workspace. Either exact-command retry pauses for user approval. Sandbox setup
 failures are fail-closed and never fall back to an unrestricted subprocess.
 Capability ACEs are deterministic and remain on the workspace as an inert cache; a
 process can use them only while its restricted token carries the matching SID. The
@@ -137,8 +138,10 @@ not persist; callers use `workdir` rather than `cd`. Read-only and workspace-wri
 executions run in ConstrainedLanguage mode on the supported Windows backend. Prefer
 cmdlets and core types in those modes. Approved danger-full-access uses the caller's
 normal PowerShell language mode. Child-process output capture through named-pipe stdio can fail as
-`spawn EPERM`; this is reported as a `process-pipe` denial. The exact command then
-becomes eligible for one `danger-full-access` retry with a separate user approval.
+`spawn EPERM`; this is reported as a `process-pipe` denial. A read-only process-pipe
+denial, or any command still denied by workspace-write (for example an external npm
+runtime or cache), makes that exact command eligible for one `danger-full-access`
+retry with a separate user approval.
 That final mode uses the caller's normal Windows token, so Node/Vite/esbuild can create
 pipe-based child processes, but the command can also access anything the current user
 can access. It is never available speculatively and cannot be used with a changed alias,

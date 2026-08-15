@@ -48,8 +48,8 @@ def describe_permission_policy() -> str:
             "- Level 2: deletes, full-file overwrites, dependency/config edits, and unknown tools require approval.",
             "- Level 3: sensitive paths and excluded paths are rejected.",
             "- shell_command runs in the Windows read-only sandbox by default.",
-            "- A denied command may be retried exactly once with workspace-write after approval.",
-            "- A process-pipe denial may be retried exactly once with danger-full-access after separate approval.",
+            "- A read-only denied command may use workspace-write, or direct danger-full-access for external package-manager access, after approval.",
+            "- Any workspace-write denial, or a read-only process-pipe denial, may be retried exactly once with danger-full-access after separate approval.",
         ]
     )
 

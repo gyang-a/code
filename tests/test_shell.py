@@ -233,6 +233,106 @@ class ShellToolTests(unittest.TestCase):
         self.assertIn("mode=danger-full-access", approved)
         self.assertEqual(len(sandbox.calls), 2)
 
+    def test_workspace_file_denial_allows_exact_danger_full_access_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = FakeSandbox(
+                [
+                    _result(
+                        mode=SandboxMode.read_only,
+                        denied=True,
+                        stderr="EPERM writing node_modules",
+                    ),
+                    _result(
+                        mode=SandboxMode.workspace_write,
+                        denied=True,
+                        stderr="Access is denied: D:\\NVMnodejs\\nodejs\\node.exe",
+                    ),
+                    _result(mode=SandboxMode.danger_full_access, stdout="installed"),
+                ]
+            )
+            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
+            base = {"command": "npm install", "description": "Install dependencies"}
+            approval_eligible = getattr(tool, "_approval_eligible")
+
+            self.assertFalse(
+                approval_eligible({**base, "sandbox_permissions": "workspace-write"})
+            )
+            read_only = tool.invoke(base)
+            self.assertTrue(
+                approval_eligible({**base, "sandbox_permissions": "workspace-write"})
+            )
+            self.assertFalse(
+                approval_eligible(
+                    {
+                        **base,
+                        "command": "npm install --cache .npm-cache",
+                        "sandbox_permissions": "workspace-write",
+                    }
+                )
+            )
+            workspace_write = tool.invoke(
+                {
+                    **base,
+                    "sandbox_permissions": "workspace-write",
+                    "justification": "npm writes node_modules.",
+                }
+            )
+            self.assertTrue(
+                approval_eligible({**base, "sandbox_permissions": "danger-full-access"})
+            )
+            danger = tool.invoke(
+                {
+                    **base,
+                    "sandbox_permissions": "danger-full-access",
+                    "justification": "npm needs its external runtime and cache.",
+                }
+            )
+
+        self.assertIn("mode=read-only", read_only)
+        self.assertIn("mode=workspace-write", workspace_write)
+        self.assertIn("sandbox_permissions='danger-full-access'", workspace_write)
+        self.assertIn("mode=danger-full-access", danger)
+        self.assertIn("stdout:\ninstalled", danger)
+        self.assertEqual(
+            [call.mode for call in sandbox.calls],
+            [
+                SandboxMode.read_only,
+                SandboxMode.workspace_write,
+                SandboxMode.danger_full_access,
+            ],
+        )
+
+    def test_read_only_file_denial_allows_direct_danger_for_package_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = FakeSandbox(
+                [
+                    _result(
+                        mode=SandboxMode.read_only,
+                        denied=True,
+                        stderr="EPERM accessing external package cache",
+                    ),
+                    _result(mode=SandboxMode.danger_full_access, stdout="resolved"),
+                ]
+            )
+            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
+            base = {"command": "uv add requests", "description": "Add dependency"}
+
+            denied = tool.invoke(base)
+            approved = tool.invoke(
+                {
+                    **base,
+                    "sandbox_permissions": "danger-full-access",
+                    "justification": "uv needs its external runtime and cache.",
+                }
+            )
+
+        self.assertIn("danger-full-access", denied)
+        self.assertIn("mode=danger-full-access", approved)
+        self.assertEqual(
+            [call.mode for call in sandbox.calls],
+            [SandboxMode.read_only, SandboxMode.danger_full_access],
+        )
+
     def test_danger_full_access_cannot_be_requested_speculatively(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             sandbox = FakeSandbox([])

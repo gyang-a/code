@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from rich.markup import escape
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from code_agent.services.summarizer import truncate
 from code_agent.ui.approval import format_tool_call_summary
@@ -25,6 +26,37 @@ TODO_MARKERS = {
     "in_progress": "[>]",
     "completed": "[x]",
 }
+
+
+class ModelWaitIndicator:
+    """Render a spinner and elapsed time while a model call is blocking."""
+
+    def __init__(self) -> None:
+        self._progress: Progress | None = None
+
+    def start(self) -> None:
+        if self._progress is not None:
+            return
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[dim]Agent is thinking…[/dim]"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        )
+        progress.add_task("model-wait", total=None)
+        progress.start()
+        self._progress = progress
+
+    def stop(self) -> None:
+        if self._progress is None:
+            return
+        self._progress.stop()
+        self._progress = None
+
+
+def chunk_begins_model_wait(chunk: Mapping[str, Any]) -> bool:
+    return any("Middleware.before_model" in str(node_name) for node_name in chunk)
 
 
 def render_stream_chunk(chunk: Mapping[str, Any]) -> None:

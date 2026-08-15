@@ -736,12 +736,18 @@ def _run_interactive_session(
                         trace_recorder=trace_recorder,
                     )
             except Exception as exc:
-                console.print(f"[red]Agent error:[/red] {exc}")
+                if _is_model_timeout_error(exc):
+                    timeout_seconds = AgentConfig(model=session.model).model_timeout_seconds
+                    error_message = f"模型 API 超时（{timeout_seconds:g} 秒），请重试。"
+                    console.print(f"[red]{error_message}[/red]")
+                else:
+                    error_message = f"Agent error: {exc}"
+                    console.print(f"[red]Agent error:[/red] {exc}")
                 _save_turn_trace(
                     session,
                     trace_recorder,
                     final_answer="",
-                    user_feedback=f"Agent error: {exc}",
+                    user_feedback=error_message,
                 )
                 continue
 
@@ -765,13 +771,26 @@ def _run_graph_stream(
     *,
     trace_recorder=None,
 ) -> str | None:
-    from code_agent.ui.stream import final_answer_from_chunk, interrupt_from_chunk, render_stream_chunk
+    from code_agent.ui.stream import (
+        ModelWaitIndicator,
+        chunk_begins_model_wait,
+        final_answer_from_chunk,
+        interrupt_from_chunk,
+        render_stream_chunk,
+    )
     from code_agent.services.trace import reset_current_trace_recorder, set_current_trace_recorder
 
     final_answer = None
+    wait_indicator = ModelWaitIndicator()
     token = set_current_trace_recorder(trace_recorder) if trace_recorder is not None else None
     try:
+        if isinstance(graph_input, Mapping):
+            wait_indicator.start()
         for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
+            if chunk_begins_model_wait(chunk):
+                wait_indicator.start()
+            else:
+                wait_indicator.stop()
             if session is not None:
                 _update_usage_from_chunk(session, chunk)
             if trace_recorder is not None:
@@ -784,9 +803,25 @@ def _run_graph_stream(
             if chunk_answer:
                 final_answer = chunk_answer
     finally:
+        wait_indicator.stop()
         if token is not None:
             reset_current_trace_recorder(token)
     return final_answer
+
+
+def _is_model_timeout_error(exc: BaseException) -> bool:
+    """Recognize timeout wrappers raised by httpx/OpenAI/LangChain clients."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = type(current).__name__.lower()
+        message = str(current).lower()
+        if isinstance(current, TimeoutError) or "timeout" in name or "timed out" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _update_usage_from_chunk(session: Session, chunk: Mapping[str, Any]) -> None:
