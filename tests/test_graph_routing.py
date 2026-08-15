@@ -21,12 +21,14 @@ from code_agent.main import (
     _format_trace_summary,
     _is_slash_command,
     _is_model_timeout_error,
+    _model_timeout_message,
     _parse_git_status_paths_z,
     _parse_undo_args,
     _print_raw,
     _resolve_chat_workspace,
 )
 from code_agent.services.persistence import SessionRecord
+from code_agent.services.errors import ModelRetriesExhaustedError
 from code_agent.services.workspace import Workspace
 from code_agent.ui.stream import (
     ModelWaitIndicator,
@@ -62,10 +64,10 @@ class GraphRoutingTests(unittest.TestCase):
     def test_agent_defaults_include_model_timeout_and_five_tool_calls(self) -> None:
         config = AgentConfig()
 
-        self.assertEqual(config.model_timeout_seconds, 120.0)
         self.assertEqual(config.max_tool_calls_per_turn, 5)
         self.assertEqual(config.max_total_tool_calls_per_run, 80)
-        self.assertEqual(config.model_request_timeout_seconds, 45.0)
+        self.assertEqual(config.model_request_timeout_seconds, 120.0)
+        self.assertEqual(config.model_total_timeout_seconds, 390.0)
         self.assertEqual(config.model_max_retries, 2)
 
     def test_model_timeout_detection_handles_wrapped_client_errors(self) -> None:
@@ -77,6 +79,19 @@ class GraphRoutingTests(unittest.TestCase):
 
         self.assertTrue(_is_model_timeout_error(wrapper))
         self.assertFalse(_is_model_timeout_error(RuntimeError("bad request")))
+
+    def test_model_timeout_message_reports_per_request_limit_and_attempts(self) -> None:
+        exhausted = ModelRetriesExhaustedError(
+            attempts=3,
+            last_error=TimeoutError("upstream timed out"),
+        )
+
+        message = _model_timeout_message(exhausted, AgentConfig())
+
+        self.assertEqual(
+            message,
+            "模型 API 请求超时（单次上限 120 秒，已尝试 3 次），请重试。",
+        )
 
     def test_model_wait_indicator_tracks_before_model_lifecycle(self) -> None:
         self.assertTrue(

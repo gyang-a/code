@@ -101,6 +101,8 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
     llm_kwargs = {
         "temperature": 0,
         "timeout": agent_config.model_request_timeout_seconds,
+        # Keep retries visible and centrally controlled by ModelRetryMiddleware.
+        "max_retries": 0,
     }
     if agent_config.api_key:
         llm_kwargs["api_key"] = agent_config.api_key
@@ -124,7 +126,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
             ),
             ModelRetryMiddleware(
                 max_retries=agent_config.model_max_retries,
-                total_timeout_seconds=agent_config.model_timeout_seconds,
+                total_timeout_seconds=agent_config.model_total_timeout_seconds,
                 base_delay_seconds=agent_config.model_retry_base_delay_seconds,
                 max_delay_seconds=agent_config.model_retry_max_delay_seconds,
                 fallback_model=fallback_llm,
@@ -197,11 +199,12 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
         base = request.system_message.text if request.system_message else SYSTEM_PROMPT
         state = request.state if isinstance(request.state, dict) else {}
         memory_query = str(state.get("user_goal") or "")
+        thread_id = str(state.get("thread_id") or "")
         runtime_metadata = (
             "Runtime metadata:\n"
             "The host provides the current project folder snapshot below. Treat it as current context, "
             "not as conversation history.\n\n"
-            f"{build_turn_metadata(self.workspace, memory_query=memory_query)}\n\n"
+            f"{build_turn_metadata(self.workspace, memory_query=memory_query, thread_id=thread_id)}\n\n"
             "Available global skills:\n"
             f"{format_skill_index(SkillStore().list_skills())}\n\n"
             "Skill loading rules:\n"

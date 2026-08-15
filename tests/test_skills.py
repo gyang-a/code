@@ -6,7 +6,11 @@ import unittest
 from unittest.mock import patch
 import os
 
-from code_agent.services.skill_review import _normalize_skill_markdown, _target_skill_name
+from code_agent.services.skill_review import (
+    _normalize_skill_markdown,
+    _proposal_rejection_reason,
+    _target_skill_name,
+)
 from code_agent.services.skills import SkillStore, default_pending_skill_root, default_skill_root, format_pending_summary, format_skill_index
 from code_agent.services.workspace import Workspace
 from code_agent.tools import build_skill_view_tool, build_skills_list_tool
@@ -131,6 +135,70 @@ class SkillTests(unittest.TestCase):
 
         self.assertIn("name: frontend-viteconfig\n", normalized)
         self.assertNotIn("Frontend ViteConfig.md", normalized)
+
+    def test_skill_review_rejects_low_confidence_one_off_feature_skill(self) -> None:
+        decision = {
+            "should_create_skill": True,
+            "skill_type": "global",
+            "is_project_specific": False,
+            "independent_workflows": 1,
+            "evidence": [{"turn_id": "turn_1", "workflow": "Add Gomoku AI"}],
+            "confidence": 0.68,
+        }
+        trace = {
+            "turns": [
+                {"turn_id": "turn_1", "user_request": "增加一个人机对战"},
+                {"turn_id": "turn_2", "user_request": "AI 怎么没有出棋"},
+            ]
+        }
+
+        reason = _proposal_rejection_reason(decision, trace=trace)
+
+        self.assertIn("below the 0.85", reason)
+
+    def test_skill_review_counts_followups_in_one_feature_as_one_workflow(self) -> None:
+        decision = {
+            "should_create_skill": True,
+            "skill_type": "global",
+            "is_project_specific": False,
+            "independent_workflows": 1,
+            "evidence": [
+                {"turn_id": "turn_1", "workflow": "Add board-game AI"},
+                {"turn_id": "turn_2", "workflow": "Fix that AI turn integration"},
+            ],
+            "confidence": 0.95,
+        }
+
+        reason = _proposal_rejection_reason(decision, trace={"turns": []})
+
+        self.assertIn("at least two independent tasks", reason)
+
+    def test_explicit_user_skill_request_can_bypass_repetition_requirement(self) -> None:
+        decision = {
+            "should_create_skill": True,
+            "skill_type": "global",
+            "is_project_specific": False,
+            "independent_workflows": 1,
+            "evidence": [],
+            "confidence": 0.95,
+        }
+        trace = {"turns": [{"user_request": "把这个流程保存成 skill"}]}
+
+        self.assertEqual(_proposal_rejection_reason(decision, trace=trace), "")
+
+    def test_project_specific_proposal_never_reaches_global_store(self) -> None:
+        decision = {
+            "should_create_skill": True,
+            "skill_type": "project",
+            "is_project_specific": True,
+            "independent_workflows": 3,
+            "evidence": ["one", "two", "three"],
+            "confidence": 0.99,
+        }
+
+        reason = _proposal_rejection_reason(decision, trace={"turns": []})
+
+        self.assertIn("project-specific knowledge", reason)
 
 
 if __name__ == "__main__":

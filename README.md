@@ -69,6 +69,11 @@ Transient model failures (timeouts, connection errors, HTTP 429, and HTTP 5xx) a
 retried twice with exponential backoff and jitter. Authentication, validation, and
 other non-transient failures are not retried. Set `CODE_AGENT_FALLBACK_MODEL` to make
 one final attempt with a second DeepSeek model after primary retries are exhausted.
+The default timeout is 120 seconds per API attempt, with a 390-second retry window.
+The underlying OpenAI-compatible client retry is disabled so every retry and attempt
+count remains visible in the CLI. These values can be changed with
+`CODE_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS`, `CODE_AGENT_MODEL_TOTAL_TIMEOUT_SECONDS`,
+and `CODE_AGENT_MODEL_MAX_RETRIES`.
 
 Tool failures remain readable `ToolMessage` objects and are also recorded as structured
 `AgentError` entries in graph state and turn traces. The structured record includes the

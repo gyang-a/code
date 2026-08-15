@@ -11,8 +11,8 @@ DEFAULT_FILE_READ_MAX_LINES = 100
 DEFAULT_TOOL_OUTPUT_LIMIT = 12_000
 DEFAULT_MAX_TOOL_CALLS_PER_TURN = 5
 DEFAULT_MAX_TOTAL_TOOL_CALLS_PER_RUN = 80
-DEFAULT_MODEL_TIMEOUT_SECONDS = 120.0
-DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS = 45.0
+DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS = 120.0
+DEFAULT_MODEL_TOTAL_TIMEOUT_SECONDS = 390.0
 DEFAULT_MODEL_MAX_RETRIES = 2
 DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS = 1.0
 DEFAULT_MODEL_RETRY_MAX_DELAY_SECONDS = 6.0
@@ -64,6 +64,20 @@ SENSITIVE_SUFFIXES = (
 )
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     model: str = field(default_factory=lambda: os.getenv("CODE_AGENT_MODEL", DEFAULT_MODEL))
@@ -74,9 +88,24 @@ class AgentConfig:
     tool_output_limit: int = DEFAULT_TOOL_OUTPUT_LIMIT
     max_tool_calls_per_turn: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN
     max_total_tool_calls_per_run: int = DEFAULT_MAX_TOTAL_TOOL_CALLS_PER_RUN
-    model_timeout_seconds: float = DEFAULT_MODEL_TIMEOUT_SECONDS
-    model_request_timeout_seconds: float = DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS
-    model_max_retries: int = DEFAULT_MODEL_MAX_RETRIES
+    model_request_timeout_seconds: float = field(
+        default_factory=lambda: _env_float(
+            "CODE_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS",
+            DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS,
+        )
+    )
+    model_total_timeout_seconds: float = field(
+        default_factory=lambda: _env_float(
+            "CODE_AGENT_MODEL_TOTAL_TIMEOUT_SECONDS",
+            DEFAULT_MODEL_TOTAL_TIMEOUT_SECONDS,
+        )
+    )
+    model_max_retries: int = field(
+        default_factory=lambda: _env_int(
+            "CODE_AGENT_MODEL_MAX_RETRIES",
+            DEFAULT_MODEL_MAX_RETRIES,
+        )
+    )
     model_retry_base_delay_seconds: float = DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS
     model_retry_max_delay_seconds: float = DEFAULT_MODEL_RETRY_MAX_DELAY_SECONDS
     fallback_model: str | None = field(default_factory=lambda: os.getenv("CODE_AGENT_FALLBACK_MODEL"))

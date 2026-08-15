@@ -10,7 +10,11 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
 from code_agent.models import AgentError
-from code_agent.services.errors import classify_tool_error, is_retryable_model_error
+from code_agent.services.errors import (
+    ModelRetriesExhaustedError,
+    classify_tool_error,
+    is_retryable_model_error,
+)
 
 
 class PerModelToolCallLimitMiddleware(AgentMiddleware):
@@ -105,13 +109,17 @@ class ModelRetryMiddleware(AgentMiddleware):
         started_at = self.monotonic()
         last_error: Exception | None = None
         total_attempts = self.max_retries + 1
+        attempts_made = 0
 
         for attempt in range(1, total_attempts + 1):
+            attempts_made = attempt
             try:
                 return handler(request)
             except Exception as exc:
                 last_error = exc
-                if not is_retryable_model_error(exc) or attempt >= total_attempts:
+                if not is_retryable_model_error(exc):
+                    raise
+                if attempt >= total_attempts:
                     break
                 delay = self._retry_delay(attempt)
                 if self._would_exceed_budget(started_at, delay):
@@ -124,10 +132,19 @@ class ModelRetryMiddleware(AgentMiddleware):
             if not self._would_exceed_budget(started_at, 0):
                 if self.on_fallback is not None:
                     self.on_fallback(last_error)
-                return handler(request.override(model=self.fallback_model))
+                try:
+                    return handler(request.override(model=self.fallback_model))
+                except Exception as exc:
+                    if not is_retryable_model_error(exc):
+                        raise
+                    last_error = exc
+                    attempts_made += 1
 
         assert last_error is not None
-        raise last_error
+        raise ModelRetriesExhaustedError(
+            attempts=attempts_made,
+            last_error=last_error,
+        ) from last_error
 
     def _retry_delay(self, failed_attempt: int) -> float:
         exponential = self.base_delay_seconds * (2 ** (failed_attempt - 1))

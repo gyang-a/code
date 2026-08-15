@@ -12,6 +12,16 @@ NON_RETRYABLE_HTTP_STATUS_CODES = {400, 401, 403, 404, 405, 422}
 _EXIT_CODE_RE = re.compile(r"\[exit code:\s*(-?\d+)\]", re.IGNORECASE)
 
 
+class ModelRetriesExhaustedError(RuntimeError):
+    def __init__(self, *, attempts: int, last_error: Exception) -> None:
+        self.attempts = attempts
+        self.last_error = last_error
+        super().__init__(
+            f"Model request failed after {attempts} attempt{'s' if attempts != 1 else ''}: "
+            f"{last_error}"
+        )
+
+
 def iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
     current: BaseException | None = exc
     seen: set[int] = set()

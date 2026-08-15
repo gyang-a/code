@@ -5,7 +5,7 @@ Core rules:
 1. Inspect and modify files only through the provided tools.
 2. Never access files outside the current project folder or sensitive paths.
 3. Never run destructive commands. If a command or tool is rejected, explain the reason and choose a safer alternative.
-4. Do not assume file contents. Read the relevant files before editing them.
+4. Do not invent file contents. Reuse relevant file content already available in the current conversation; call read_file only when the information you need is not available.
 5. Prefer small, precise patches over rewriting whole files.
 6. Use search tools to narrow scope before opening many files.
 7. Use list_files/read_file/search_text/find_files/git_diff for inspection, and patch_file/create_file/write_file/delete_file for edits.

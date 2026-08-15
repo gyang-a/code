@@ -11,7 +11,11 @@ from code_agent.middleware import (
     PerModelToolCallLimitMiddleware,
     ToolErrorMiddleware,
 )
-from code_agent.services.errors import classify_tool_error, is_retryable_model_error
+from code_agent.services.errors import (
+    ModelRetriesExhaustedError,
+    classify_tool_error,
+    is_retryable_model_error,
+)
 
 
 class PerModelToolCallLimitTests(unittest.TestCase):
@@ -94,6 +98,28 @@ class ModelRetryMiddlewareTests(unittest.TestCase):
             middleware.wrap_model_call(ModelRequest(model=object(), messages=[]), handler)
 
         self.assertEqual(attempts, 1)
+
+    def test_reports_attempt_count_after_retryable_failures_are_exhausted(self) -> None:
+        attempts = 0
+        middleware = ModelRetryMiddleware(
+            max_retries=2,
+            total_timeout_seconds=390,
+            base_delay_seconds=0,
+            max_delay_seconds=0,
+            sleep=lambda _delay: None,
+        )
+
+        def handler(_request):
+            nonlocal attempts
+            attempts += 1
+            raise TimeoutError("upstream timed out")
+
+        with self.assertRaises(ModelRetriesExhaustedError) as raised:
+            middleware.wrap_model_call(ModelRequest(model=object(), messages=[]), handler)
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(raised.exception.attempts, 3)
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
 
     def test_uses_configured_fallback_after_primary_retries(self) -> None:
         primary = object()

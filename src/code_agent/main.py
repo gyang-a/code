@@ -774,8 +774,8 @@ def _run_interactive_session(
                     )
             except Exception as exc:
                 if _is_model_timeout_error(exc):
-                    timeout_seconds = AgentConfig(model=session.model).model_timeout_seconds
-                    error_message = f"模型 API 超时（{timeout_seconds:g} 秒），请重试。"
+                    agent_config = AgentConfig(model=session.model)
+                    error_message = _model_timeout_message(exc, agent_config)
                     console.print(f"[red]{error_message}[/red]")
                 else:
                     error_message = f"Agent error: {exc}"
@@ -852,6 +852,17 @@ def _is_model_timeout_error(exc: BaseException) -> bool:
     from code_agent.services.errors import is_timeout_error
 
     return is_timeout_error(exc)
+
+
+def _model_timeout_message(exc: BaseException, config: AgentConfig) -> str:
+    from code_agent.services.errors import ModelRetriesExhaustedError
+
+    attempts = exc.attempts if isinstance(exc, ModelRetriesExhaustedError) else 1
+    timeout_seconds = config.model_request_timeout_seconds
+    return (
+        f"模型 API 请求超时（单次上限 {timeout_seconds:g} 秒，"
+        f"已尝试 {attempts} 次），请重试。"
+    )
 
 
 def _update_usage_from_chunk(session: Session, chunk: Mapping[str, Any]) -> None:

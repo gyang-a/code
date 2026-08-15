@@ -15,6 +15,9 @@ from code_agent.services.summarizer import truncate
 from code_agent.services.trace import reviewable_project_trace, should_review_trace
 
 
+MIN_GLOBAL_SKILL_CONFIDENCE = 0.85
+
+
 @dataclass(frozen=True)
 class SkillReviewResult:
     status: str
@@ -41,7 +44,8 @@ def review_trace_for_skills(
 
     llm_kwargs: dict[str, Any] = {
         "temperature": 0,
-        "timeout": config.model_timeout_seconds,
+        "timeout": config.model_request_timeout_seconds,
+        "max_retries": 1,
     }
     if config.api_key:
         llm_kwargs["api_key"] = config.api_key
@@ -57,6 +61,10 @@ def review_trace_for_skills(
         data = _parse_json_object(str(response.content))
         if not _bool_from_decision(data):
             return SkillReviewResult(status="none", message=str(data.get("reason") or "No reusable skill update."))
+
+        rejection_reason = _proposal_rejection_reason(data, trace=trace)
+        if rejection_reason:
+            return SkillReviewResult(status="none", message=rejection_reason)
 
         target_skill = _target_skill_name(str(data.get("target_skill") or data.get("skill_name") or "learned-skill"))
         content = _normalize_skill_markdown(
@@ -171,6 +179,59 @@ def _confidence_from_decision(data: Mapping[str, Any]) -> float:
     return max(0.0, min(confidence, 1.0))
 
 
+def _proposal_rejection_reason(data: Mapping[str, Any], *, trace: Mapping[str, Any]) -> str:
+    confidence = _confidence_from_decision(data)
+    if confidence < MIN_GLOBAL_SKILL_CONFIDENCE:
+        return (
+            f"Skill proposal suppressed: confidence {confidence:.2f} is below the "
+            f"{MIN_GLOBAL_SKILL_CONFIDENCE:.2f} global-skill threshold."
+        )
+
+    skill_type = str(data.get("skill_type") or "").strip().lower()
+    if skill_type != "global":
+        return "Skill proposal suppressed: project-specific knowledge stays in project memory and trace."
+
+    if bool(data.get("is_project_specific", False)):
+        return "Skill proposal suppressed: a single project's feature or bug is not a reusable global skill."
+
+    if _trace_explicitly_requests_skill(trace):
+        return ""
+
+    try:
+        independent_workflows = int(data.get("independent_workflows", 0))
+    except (TypeError, ValueError):
+        independent_workflows = 0
+    evidence = data.get("evidence")
+    evidence_items = evidence if isinstance(evidence, list) else []
+    if independent_workflows < 2 or len(evidence_items) < 2:
+        return (
+            "Skill proposal suppressed: the trace does not show the same reusable workflow "
+            "across at least two independent tasks. Follow-up corrections within one feature "
+            "implementation count as one task."
+        )
+    return ""
+
+
+def _trace_explicitly_requests_skill(trace: Mapping[str, Any]) -> bool:
+    requests: list[str] = []
+    turns = trace.get("turns")
+    if isinstance(turns, list):
+        requests.extend(
+            str(turn.get("user_request") or "")
+            for turn in turns
+            if isinstance(turn, Mapping)
+        )
+    requests.append(str(trace.get("user_request") or ""))
+    combined = "\n".join(requests).lower()
+    return bool(
+        re.search(
+            r"(?:create|write|save|update|生成|创建|写入|保存|更新).{0,16}(?:skill|技能)"
+            r"|(?:skill|技能).{0,16}(?:create|write|save|update|生成|创建|写入|保存|更新)",
+            combined,
+        )
+    )
+
+
 def _latest_turn(trace: Mapping[str, Any]) -> Mapping[str, Any]:
     turns = trace.get("turns")
     if isinstance(turns, list) and turns and isinstance(turns[-1], Mapping):
@@ -234,26 +295,43 @@ _TRACE_REVIEW_SYSTEM_PROMPT = """
 You are a background skill reviewer for a coding agent.
 
 Read the structured project trace and decide whether it reveals reusable procedural
-knowledge that should become a skill. Pay attention to user feedback and corrections
-across multiple turns, not only the latest request. Prefer durable workflows, repeated
-recovery patterns, user corrections, workspace conventions that future runs should obey,
-and non-obvious tool sequences. Do not create skills for one-off facts, secrets, private
-data, or generic coding advice. If the user explicitly requests that relevant content be
-written into the skill, you shall comply.
+knowledge that should become a global skill. The default decision is false. A skill must
+capture a durable procedure that has appeared in at least two independent tasks and would
+be useful across unrelated projects. Multiple messages, retries, bug reports, or user
+corrections while implementing one feature count as ONE task, not repeated evidence.
+
+Do NOT create a skill for:
+- a feature implemented in one application (games, dashboards, forms, CRUD, animations);
+- a project-specific bug or missing integration discovered while completing that feature;
+- ordinary implementation advice such as wiring a function into control flow;
+- a temporary smoke test or standard syntax/build/test validation;
+- facts, code structure, constants, filenames, or conventions from one repository;
+- a lesson whose title or procedure is tied to one product or domain, such as Gomoku AI.
+
+Keep project-specific lessons in the project trace or project memory instead. Global skill
+candidates include repeated cross-project tool recovery procedures, platform constraints,
+or workflows the user explicitly asks to save as a skill. User feedback is evidence about
+task correctness; it is not automatically evidence that a skill should exist.
 
 Respond with only one JSON object matching this schema:
 {
   "should_create_skill": false,
   "reason": "why no reusable skill is needed",
   "skill_type": "global",
+  "is_project_specific": false,
+  "independent_workflows": 0,
+  "evidence": [],
   "target_skill": "",
   "operation": "create",
   "proposed_content": "",
   "confidence": 0.0
 }
 
-When a skill is useful, set should_create_skill to true. skill_type must be "global" or
-"project". operation must be "create" or "update". target_skill must be a concise
+When a skill is useful, set should_create_skill to true. skill_type must be "global".
+Set independent_workflows to the number of genuinely separate tasks showing the same
+procedure and provide at least two evidence items with turn id and short workflow summary.
+If the evidence is all part of one feature request, set independent_workflows to 1 and
+should_create_skill to false. operation must be "create" or "update". target_skill must be a concise
 lowercase filename-like name, for example "frontend-viteconfig.md" or
 "frontend-style-editing.md". proposed_content must be a complete SKILL.md file with YAML
 frontmatter containing only name and description. The frontmatter name must be lowercase

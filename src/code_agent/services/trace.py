@@ -429,6 +429,64 @@ def reviewable_project_trace(
     }
 
 
+def recent_thread_context(
+    workspace: str | Path,
+    thread_id: str,
+    *,
+    limit: int = 3,
+    output_limit: int = 3000,
+) -> str:
+    """Render a bounded summary of recently completed work in one conversation."""
+
+    if not thread_id:
+        return ""
+    path = _ensure_trace_store(workspace)
+    turns: list[dict[str, Any]] = []
+    try:
+        with closing(sqlite3.connect(path)) as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM trace_turns ORDER BY sequence DESC LIMIT ?",
+                (MAX_FULL_TRACE_TURNS,),
+            ).fetchall()
+        for row in rows:
+            turn = _json_object(row[0])
+            if turn is None or str(turn.get("thread_id") or "") != thread_id:
+                continue
+            turns.append(turn)
+            if len(turns) >= max(1, limit):
+                break
+    except (OSError, sqlite3.Error):
+        return ""
+
+    if not turns:
+        return ""
+    lines = ["Recent completed work in this conversation:"]
+    for turn in reversed(turns):
+        request = " ".join(str(turn.get("user_request") or "").split())
+        answer = " ".join(str(turn.get("final_answer") or "").split())
+        lines.append(f"- Goal: {truncate(request, 300)}")
+        if answer:
+            lines.append(f"  Outcome: {truncate(answer, 700)}")
+        changes = turn.get("file_changes")
+        if isinstance(changes, list) and changes:
+            rendered_changes = []
+            for change in changes[:12]:
+                if not isinstance(change, Mapping):
+                    continue
+                rendered_changes.append(
+                    f"{change.get('operation') or 'change'}:{change.get('path') or 'unknown'}"
+                )
+            if rendered_changes:
+                lines.append(f"  Files: {', '.join(rendered_changes)}")
+        validation = " ".join(str(turn.get("validation") or "").split())
+        if validation:
+            lines.append(f"  Validation: {truncate(validation, 400)}")
+        errors = turn.get("errors")
+        if isinstance(errors, list) and errors:
+            lines.append(f"  Errors recorded: {len(errors)}")
+    return truncate("\n".join(lines), output_limit)
+
+
 def ensure_agent_state_ignored(workspace: str | Path) -> None:
     workspace_path = Path(workspace).expanduser().resolve()
     state_dir = workspace_path / STATE_DIR

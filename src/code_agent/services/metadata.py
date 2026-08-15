@@ -5,6 +5,7 @@ from pathlib import Path
 
 from code_agent.services.memory import format_project_memory, load_relevant_project_memory
 from code_agent.services.summarizer import truncate
+from code_agent.services.trace import recent_thread_context
 from code_agent.services.workspace import Workspace, WorkspaceError
 
 
@@ -34,6 +35,7 @@ def build_turn_metadata(
     *,
     max_entries: int = 25,
     memory_query: str = "",
+    thread_id: str = "",
 ) -> str:
     """
     Build compact per-turn context for the agent.
@@ -80,6 +82,16 @@ def build_turn_metadata(
                 "",
                 "Project memory:",
                 truncate(memory, 4000),
+            ]
+        )
+
+    continuity = recent_thread_context(workspace.root, thread_id)
+    if continuity:
+        lines.extend(
+            [
+                "",
+                continuity,
+                "Use this as continuity context. Do not claim completed work is still pending.",
             ]
         )
 

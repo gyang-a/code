@@ -6,6 +6,10 @@ from code_agent.prompts import SYSTEM_PROMPT
 
 
 class PromptTests(unittest.TestCase):
+    def test_prompt_reuses_available_file_context_without_forced_rereads(self) -> None:
+        self.assertIn("Reuse relevant file content already available", SYSTEM_PROMPT)
+        self.assertNotIn("Read the relevant files before editing", SYSTEM_PROMPT)
+
     def test_broad_review_has_explicit_exploration_budget(self) -> None:
         self.assertIn("broad review", SYSTEM_PROMPT)
         self.assertIn("Do not read the whole repository", SYSTEM_PROMPT)
