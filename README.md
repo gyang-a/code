@@ -1,20 +1,18 @@
 # Code Agent
 
-A workspace-safe CLI coding agent built with LangGraph tool calling.
+基于 LangGraph 工具调用构建的命令行编程智能体，以工作区为安全边界。
 
-## Quick Start
+## 快速开始
 
 ```bash
 code-agent .
 ```
 
-The CLI loads `.env` from the selected workspace. Set `DEEPSEEK_API_KEY` and optionally `CODE_AGENT_MODEL`.
+CLI 会从所选工作区加载 `.env`。请设置 `DEEPSEEK_API_KEY`，也可以通过 `CODE_AGENT_MODEL` 指定模型。
 
-The selected workspace is the safety boundary. By default, `code-agent .`
-binds to the current working directory. You can also pass the project folder
-explicitly, for example `code-agent C:\path\to\project`.
+所选工作区就是安全边界。默认情况下，`code-agent .` 使用当前工作目录。也可以显式指定项目目录，例如 `code-agent C:\path\to\project`。
 
-## Graph Flow
+## 图执行流程
 
 ```text
 START
@@ -25,83 +23,63 @@ START
   -> agent | END
 ```
 
-The `agent` node is the only LLM decision point. It decides whether to inspect, edit, or answer. The graph provides runtime context, executes project tools, handles human review, tracks changed files, and compacts old context when needed.
+`agent` 节点是唯一由大语言模型作出决策的节点，负责决定检查文件、修改代码还是直接回答。图负责提供运行时上下文、执行项目工具、处理人工审批、跟踪文件变更，并在需要时压缩旧上下文。
 
-Slash commands such as `/help`, `/diff`, `/doctor`, `/tools`, `/resume`, and `/undo` are handled by the CLI before the graph runs.
+`/help`、`/diff`、`/doctor`、`/tools`、`/resume` 和 `/undo` 等斜杠命令由 CLI 在图运行前处理。
 
-## Permission Levels
+## 权限等级
 
-- Level 0: read-only tools, such as `list_files`, `read_file`, `search_text`, `git_status`, and `git_diff`.
-- Level 1: low-risk workspace edits.
-- Level 2: user review required, such as package metadata edits, deletes, full-file overwrites, or writes outside `src/` and `tests/`.
-- Level 3: rejected sensitive or excluded paths, such as `.env`, `.ssh`, and `.git`.
+- 等级 0：只读工具，例如 `list_files`、`read_file`、`search_text`、`git_status` 和 `git_diff`。
+- 等级 1：工作区内的低风险修改。
+- 等级 2：需要用户审批，例如修改包元数据、删除文件、覆盖整个文件，或写入 `src/` 和 `tests/` 之外的位置。
+- 等级 3：拒绝访问敏感或排除路径，例如 `.env`、`.ssh` 和 `.git`。
 
-## Human Review
+## 人工审批
 
-Level 2 tool calls follow the LangChain/LangGraph human-in-the-loop pattern:
+等级 2 的工具调用遵循 LangChain/LangGraph 的人工介入流程：
 
-1. After the model emits tool calls, the graph reviews the full batch before any tool executes.
-2. If one or more calls need review, `execute` interrupts with one payload containing `action_requests` for all pending calls and matching `review_configs`.
-3. The CLI resumes with a same-order `decisions` list. Each decision can be `approve`, `edit`, `reject`, or `respond`.
-4. Approved or edited calls execute and produce normal `ToolMessage` content containing only the tool result.
-5. Rejected or responded calls produce one synthetic `ToolMessage` for their corresponding tool call.
-6. The agent continues from the resumed state.
+1. 模型生成工具调用后，图会先检查整批调用，再执行任何工具。
+2. 如果有调用需要审批，`execute` 会中断执行，并在同一个载荷中提供所有待处理调用的 `action_requests` 及对应的 `review_configs`。
+3. CLI 使用顺序一致的 `decisions` 列表恢复执行。每项决策可以是 `approve`（批准）、`edit`（修改）、`reject`（拒绝）或 `respond`（直接回应）。
+4. 获准或修改后的调用会执行，并生成仅包含工具结果的正常 `ToolMessage`。
+5. 被拒绝或直接回应的调用会各自生成一条合成的 `ToolMessage`，与对应的工具调用匹配。
+6. 智能体从恢复后的状态继续运行。
 
-Approval protocol data is not appended to `messages`; it lives only in the interrupt payload and resume value.
+审批协议数据不会追加到 `messages` 中，只存在于中断载荷和恢复值中。
 
-## Context Compaction
+## 上下文压缩
 
-The graph compacts old messages when message count or estimated characters exceed configured limits. It keeps recent `AIMessage(tool_calls) + ToolMessage` blocks intact so tool observations are not orphaned, stores the summary in `state.context_summary`, and injects that summary only for later LLM calls.
+当消息数量或估算字符数超过配置限制时，图会压缩旧消息。压缩时会完整保留近期的 `AIMessage(tool_calls) + ToolMessage` 消息块，避免工具结果与调用脱节；摘要保存在 `state.context_summary` 中，仅在后续模型调用时注入。
 
-Project instructions in `AGENTS.md` are always injected. Long-term notes in
-`.code-agent/memory.md` are split by Markdown heading and indexed in
-`.code-agent/memory.sqlite3`; only sections relevant to the current user goal are added
-to model context.
+`AGENTS.md` 中的项目指令始终会被注入。`.code-agent/memory.md` 中的长期笔记按 Markdown 标题拆分，并在 `.code-agent/memory.sqlite3` 中建立索引；只有与用户当前目标相关的章节会加入模型上下文。
 
-## Reliability Controls
+## 可靠性控制
 
-Each model response is hard-limited to five tool calls before it reaches the tool
-executor. Extra calls are omitted with a host note so the model can continue the
-remaining work in a later response. A separate run-level limit bounds the total tool
-calls across the whole agent run.
+每次模型响应在到达工具执行器之前，最多保留 5 个工具调用。超出的调用会被省略，并附上运行程序的说明，让模型在后续响应中继续剩余工作。此外，单次智能体运行还有独立的工具调用总量限制。
 
-Transient model failures (timeouts, connection errors, HTTP 429, and HTTP 5xx) are
-retried twice with exponential backoff and jitter. Authentication, validation, and
-other non-transient failures are not retried. Set `CODE_AGENT_FALLBACK_MODEL` to make
-one final attempt with a second DeepSeek model after primary retries are exhausted.
-The default timeout is 120 seconds per API attempt, with a 390-second retry window.
-The underlying OpenAI-compatible client retry is disabled so every retry and attempt
-count remains visible in the CLI. These values can be changed with
-`CODE_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS`, `CODE_AGENT_MODEL_TOTAL_TIMEOUT_SECONDS`,
-and `CODE_AGENT_MODEL_MAX_RETRIES`.
+模型遇到超时、连接错误、HTTP 429 或 HTTP 5xx 等临时故障时，会采用指数退避和随机抖动重试两次。认证失败、校验失败及其他非临时故障不会重试。设置 `CODE_AGENT_FALLBACK_MODEL` 后，主模型重试耗尽时会使用另一个 DeepSeek 模型进行最后一次尝试。
 
-Tool failures remain readable `ToolMessage` objects and are also recorded as structured
-`AgentError` entries in graph state and turn traces. The structured record includes the
-source, category, stable code, retryability, attempt, call id, and details such as a
-process exit code.
+默认每次 API 请求的超时时间为 120 秒，重试时间窗口为 390 秒。底层 OpenAI 兼容客户端的自动重试已禁用，以便 CLI 清楚展示每次尝试和重试次数。可通过以下配置调整这些参数：
 
-## Global Skills
+- `CODE_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS`
+- `CODE_AGENT_MODEL_TOTAL_TIMEOUT_SECONDS`
+- `CODE_AGENT_MODEL_MAX_RETRIES`
 
-Code Agent can use a reusable skill library across all workspaces. By default, skills
-live in this Code Agent checkout, not in the workspace being edited:
+工具失败会以可读的 `ToolMessage` 返回，同时作为结构化 `AgentError` 记录到图状态和轮次追踪中。结构化记录包含来源、类别、稳定错误码、是否可重试、尝试次数、调用 ID，以及进程退出码等详细信息。
+
+## 全局技能
+
+Code Agent 可以在所有工作区之间复用技能库。默认情况下，技能保存在 Code Agent 自身的项目目录中，而不是正在编辑的工作区中：
 
 ```text
 <code-agent-project>/.code-agent/skills/<skill-name>/SKILL.md
 ```
 
-Set `CODE_AGENT_HOME`, `CODE_AGENT_SKILLS_DIR`, or `CODE_AGENT_PENDING_SKILLS_DIR` to
-override those locations. Pending changes created by older versions under
-`~/.code-agent/pending/skills` are still readable so they can be approved or rejected.
+可通过 `CODE_AGENT_HOME`、`CODE_AGENT_SKILLS_DIR` 或 `CODE_AGENT_PENDING_SKILLS_DIR` 覆盖这些位置。旧版本保存在 `~/.code-agent/pending/skills` 下的待处理变更仍可读取，并可批准或拒绝。
 
-Each turn injects a compact global skill index into runtime metadata. The model can call
-`skills_list` and `skill_view` to load a relevant skill on demand.
+每一轮都会将精简的全局技能索引注入运行时元数据。模型可以调用 `skills_list` 和 `skill_view` 按需加载相关技能。
 
-After sufficiently tool-heavy work, or after write tools are used, a background reviewer
-checks whether durable procedural knowledge should be saved. The reviewer reads the
-structured turn trace, not compressed conversation state, so tool calls, results, file
-changes, errors, validation, final answer, and existing skills remain auditable. When it
-finds a useful skill, the CLI presents the proposed change like a tool approval: it prints
-the diff, asks for `y/n`, and writes the skill only after approval. Use:
+当一轮工作使用了较多工具，或使用过写入工具时，后台审查智能体会判断是否有值得长期保存的操作知识。审查依据是结构化轮次追踪，而非压缩后的会话状态，因此工具调用、执行结果、文件变更、错误、验证、最终回答及已有技能都可供审计。发现有价值的技能后，CLI 会像工具审批一样展示变更建议：打印差异，询问 `y/n`，仅在批准后写入技能。可使用以下命令：
 
 ```text
 /skills list
@@ -109,7 +87,7 @@ the diff, asks for `y/n`, and writes the skill only after approval. Use:
 /skills view <name>
 ```
 
-Legacy pending proposals are still supported for old local data:
+为兼容旧的本地数据，仍支持以下待处理提案命令：
 
 ```text
 /skills pending
@@ -118,78 +96,49 @@ Legacy pending proposals are still supported for old local data:
 /skills reject <id>
 ```
 
-## Turn Traces
+## 轮次追踪
 
-Each agent turn appends an audit record to a project-local SQLite trace store:
+智能体每一轮都会向项目本地的 SQLite 追踪数据库追加一条审计记录：
 
 ```text
 .code-agent/traces.sqlite3
 ```
 
-The trace store is local state. Code Agent writes `.code-agent/.gitignore` and, when
-the workspace is a Git repository, adds `.code-agent/` to `.git/info/exclude` so traces
-and checkpoints are not tracked by project Git history. Skill review reads this project
-trace so user feedback and corrections across turns are visible. When the project trace
-grows, review receives a bounded view: a structured historical summary plus the most
-recent raw turns. The latest 100 turns retain their complete payload; older turns are
-represented by the aggregate summary. Existing `.code-agent/traces/project_trace.json`
-files are imported once and retained as legacy backups.
+追踪数据库属于本地状态。Code Agent 会写入 `.code-agent/.gitignore`；如果工作区是 Git 仓库，还会将 `.code-agent/` 加入 `.git/info/exclude`，以避免追踪记录和检查点进入项目 Git 历史。技能审查会读取项目追踪记录，从而了解跨轮次的用户反馈和纠正。
 
-A bounded human-readable mirror is refreshed automatically at:
+随着项目追踪记录增长，审查使用的数据范围会受到限制：结构化历史摘要加上最近的原始轮次记录。最近 100 轮保留完整载荷，更早的轮次则由聚合摘要表示。已有的 `.code-agent/traces/project_trace.json` 文件会被导入一次，并保留为旧版备份。
+
+程序还会自动刷新一份大小受限、便于人工阅读的镜像文件：
 
 ```text
 .code-agent/traces/project_trace.readable.json
 ```
 
-It contains the aggregate summary and latest 20 complete turns. Use `/trace` or
-`/trace 10` inside the CLI for a concise recent-turn view and the mirror path.
+其中包含聚合摘要和最近 20 轮的完整记录。在 CLI 中使用 `/trace` 或 `/trace 10`，可查看精简的近期轮次记录及镜像文件路径。
 
-## Undo
+## 撤销修改
 
-`/undo` is scoped to the latest agent turn. Each turn records the Git dirty paths that
-already existed before the agent started, plus the files the agent actually changed.
-When the agent edits a file that was already dirty, Code Agent saves a private before
-snapshot under `.code-agent/undo/<turn-id>/` and restores that snapshot during undo. For
-files that were clean at turn start, undo uses Git restore; for files the agent created,
-undo removes only those paths.
+`/undo` 仅作用于智能体最近一轮的修改。每轮开始时会记录 Git 中已有未提交改动的路径，并跟踪智能体实际修改的文件。
 
-## Tools
+如果智能体修改的文件在本轮开始前就有未提交改动，Code Agent 会在 `.code-agent/undo/<turn-id>/` 下保存修改前的私有快照，撤销时恢复该快照。对于本轮开始时干净的文件，撤销使用 Git 恢复；对于智能体新建的文件，撤销只删除这些文件。
 
-The model can call bounded filesystem, search, git, skill, and Windows PowerShell tools.
-`read_file` returns a limited text window by default; the agent must request later
-`start_line` values to continue reading.
+## 工具
 
-`shell_command` runs PowerShell with a Windows `WRITE_RESTRICTED` token. The default
-`read-only` mode has no workspace write capability. After a real file denial, normal
-workspace-local commands may retry with `sandbox_permissions="workspace-write"`.
-Dependency/package-manager commands such as `npm install` and `uv add` may instead
-request `danger-full-access` directly because their runtimes and caches commonly live
-outside the workspace. Either exact-command retry pauses for user approval. Sandbox setup
-failures are fail-closed and never fall back to an unrestricted subprocess.
-Capability ACEs are deterministic and remain on the workspace as an inert cache; a
-process can use them only while its restricted token carries the matching SID. The
-per-command temporary directory and its capability disappear after execution.
+模型可以调用受限的文件系统、搜索、Git、技能和 Windows PowerShell 工具。`read_file` 默认只返回有限范围的文本；智能体需要指定后续的 `start_line` 才能继续读取。
 
-Every shell call starts a fresh `pwsh -Command` process, so PowerShell state does
-not persist; callers use `workdir` rather than `cd`. Read-only and workspace-write
-executions run in ConstrainedLanguage mode on the supported Windows backend. Prefer
-cmdlets and core types in those modes. Approved danger-full-access uses the caller's
-normal PowerShell language mode. Child-process output capture through named-pipe stdio can fail as
-`spawn EPERM`; this is reported as a `process-pipe` denial. A read-only process-pipe
-denial, or any command still denied by workspace-write (for example an external npm
-runtime or cache), makes that exact command eligible for one `danger-full-access`
-retry with a separate user approval.
-That final mode uses the caller's normal Windows token, so Node/Vite/esbuild can create
-pipe-based child processes, but the command can also access anything the current user
-can access. It is never available speculatively and cannot be used with a changed alias,
-wrapper, or command spelling.
+`shell_command` 使用 Windows `WRITE_RESTRICTED` 令牌运行 PowerShell。默认的 `read-only` 模式不允许写入工作区。发生实际文件访问拒绝后，普通的工作区内命令可以通过 `sandbox_permissions="workspace-write"` 申请重试。`npm install`、`uv add` 等依赖或包管理命令则可以直接申请 `danger-full-access`，因为它们的运行时和缓存通常位于工作区之外。这两类针对原命令的重试都会暂停并等待用户批准。沙箱初始化失败时会直接拒绝执行，绝不回退到不受限制的子进程。
 
-The Windows ACL backend reports partial enforcement: Windows objects writable by
-Everyone and NTFS hard-link aliases are platform limitations, and read access, network,
-and process visibility are outside this write sandbox. Sensitive credential-like
-environment variables are removed before commands start.
+用于授予能力的访问控制条目（ACE）采用确定性方式生成，并作为不具备独立授权作用的缓存保留在工作区中；只有进程的受限令牌携带匹配的安全标识符（SID）时，才能使用这些权限。每条命令的临时目录及其对应能力会在执行结束后移除。
 
-## Useful Commands
+每次 Shell 调用都会启动新的 `pwsh -Command` 进程，因此 PowerShell 状态不会保留；调用方应使用 `workdir` 指定目录，而非依赖 `cd`。在受支持的 Windows 后端中，`read-only` 和 `workspace-write` 模式使用受限语言模式（ConstrainedLanguage），应优先使用 cmdlet 和核心类型。经批准的 `danger-full-access` 模式使用调用者正常的 PowerShell 语言模式。
+
+通过命名管道标准输入输出捕获子进程输出时，可能出现 `spawn EPERM`，这会被报告为 `process-pipe` 拒绝。只读模式下出现 `process-pipe` 拒绝，或命令在 `workspace-write` 模式下仍被拒绝（例如需要访问外部 npm 运行时或缓存）时，该原命令可以单独申请用户批准，使用 `danger-full-access` 重试一次。
+
+这一最终模式使用调用者正常的 Windows 令牌，使 Node、Vite、esbuild 可以创建基于管道的子进程，同时也意味着命令可以访问当前用户有权访问的所有资源。除前述依赖或包管理命令可直接申请的情况外，不能预先尝试使用该模式，也不能通过更换别名、包装程序或命令写法来重试。
+
+Windows ACL 后端只提供部分约束：允许 Everyone 写入的 Windows 对象和 NTFS 硬链接别名是平台层面的限制；读取权限、网络访问和进程可见性不在这个写入沙箱的约束范围内。命令启动前会移除疑似包含敏感凭据的环境变量。
+
+## 常用命令
 
 ```text
 /doctor
@@ -202,6 +151,4 @@ environment variables are removed before commands start.
 /help
 ```
 
-Inside an active CLI session, `/sessions` lists saved conversation threads for
-the workspace. `/resume` lists saved threads and prompts for a thread id, unique
-prefix, or list number; `/resume [thread-id]` switches directly.
+在正在运行的 CLI 会话中，`/sessions` 会列出工作区已保存的会话线程。`/resume` 会列出已保存的线程，并提示输入线程 ID、唯一前缀或列表序号；`/resume [thread-id]` 则直接切换到指定线程。
