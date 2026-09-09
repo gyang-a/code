@@ -112,6 +112,10 @@ class AgentConfig:
     shell_timeout_ms: int = DEFAULT_SHELL_TIMEOUT_MS
     shell_max_timeout_ms: int = DEFAULT_SHELL_MAX_TIMEOUT_MS
     shell_output_limit: int = DEFAULT_SHELL_OUTPUT_LIMIT
+    shell_mode: str = 'workspace-write'
+    shell_approval_policy: str = 'on-risk'
+    # Host-owned exact commands; never load allow rules from an agent-writable file.
+    shell_allowed_commands: tuple[str, ...] = ()
     context_message_limit: int = DEFAULT_CONTEXT_MESSAGE_LIMIT
     context_token_limit: int = DEFAULT_CONTEXT_TOKEN_LIMIT
     context_keep_recent: int = DEFAULT_CONTEXT_KEEP_RECENT

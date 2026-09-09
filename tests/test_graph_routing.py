@@ -429,21 +429,8 @@ class GraphRoutingTests(unittest.TestCase):
                     )
                 )
             )
-            shell_tool = next(tool for tool in tools if tool.name == "shell_command")
-            object.__setattr__(shell_tool, "_approval_eligible", lambda args: True)
-            self.assertTrue(
-                config["shell_command"]["when"](
-                    FakeToolCallRequest(
-                        "shell_command",
-                        {
-                            "command": "pytest",
-                            "description": "Run tests",
-                            "sandbox_permissions": "workspace-write",
-                            "justification": "Tests create cache files.",
-                        },
-                    )
-                )
-            )
+            self.assertTrue(config["shell_command"]["when"](
+                FakeToolCallRequest("shell_command", {"command": "pytest", "description": "Run tests"})))
 
     def test_runtime_metadata_middleware_injects_system_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

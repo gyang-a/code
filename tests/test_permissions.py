@@ -83,7 +83,7 @@ class PermissionTests(unittest.TestCase):
             self.assertTrue(decision.allowed)
             self.assertFalse(decision.requires_approval)
 
-    def test_workspace_write_shell_requires_approval(self) -> None:
+    def test_legacy_workspace_escalation_is_rejected(self) -> None:
         with TemporaryWorkspace() as tmp_path:
             workspace = Workspace(tmp_path)
 
@@ -98,10 +98,10 @@ class PermissionTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(decision.risk, RiskLevel.level_2)
-            self.assertTrue(decision.requires_approval)
+            self.assertEqual(decision.risk, RiskLevel.level_3)
+            self.assertFalse(decision.requires_approval)
 
-    def test_danger_full_access_shell_requires_approval_and_warns(self) -> None:
+    def test_full_access_is_rejected(self) -> None:
         with TemporaryWorkspace() as tmp_path:
             workspace = Workspace(tmp_path)
 
@@ -116,9 +116,9 @@ class PermissionTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(decision.risk, RiskLevel.level_2)
-            self.assertTrue(decision.requires_approval)
-            self.assertIn("anywhere accessible to the current user", decision.reason)
+            self.assertEqual(decision.risk, RiskLevel.level_3)
+            self.assertFalse(decision.requires_approval)
+            self.assertIn("escalation is disabled", decision.reason)
 
 
 class TemporaryWorkspace:

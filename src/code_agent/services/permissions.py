@@ -47,9 +47,9 @@ def describe_permission_policy() -> str:
             "- Level 1: low-risk project file edits are allowed.",
             "- Level 2: deletes, full-file overwrites, dependency/config edits, and unknown tools require approval.",
             "- Level 3: sensitive paths and excluded paths are rejected.",
-            "- shell_command runs in the Windows read-only sandbox by default.",
-            "- A read-only denied command may use workspace-write, or direct danger-full-access for external package-manager access, after approval.",
-            "- Any workspace-write denial, or a read-only process-pipe denial, may be retried exactly once with danger-full-access after separate approval.",
+            "- Shell mode is host-controlled; workspace-write is the default.",
+            "- Known reads and host-authorized commands run directly; other commands require approval.",
+            "- Forbidden paths/actions are denied even after approval. Full-access escalation is disabled.",
         ]
     )
 
@@ -60,52 +60,8 @@ def classify_tool_call(
     args: dict[str, Any],
 ) -> PermissionDecision:
     if tool_name == "shell_command":
-        workdir = args.get("workdir", ".")
-        if not isinstance(workdir, str):
-            return PermissionDecision(
-                risk=RiskLevel.level_3,
-                allowed=False,
-                reason="shell_command has an invalid workdir.",
-            )
-        try:
-            resolved = workspace.resolve(workdir)
-        except WorkspaceError as exc:
-            return PermissionDecision(
-                risk=RiskLevel.level_3,
-                allowed=False,
-                reason=str(exc),
-            )
-
-        requested = args.get("sandbox_permissions")
-        if requested == "workspace-write":
-            justification = str(args.get("justification") or "").strip()
-            return PermissionDecision(
-                risk=RiskLevel.level_2,
-                allowed=False,
-                requires_approval=True,
-                reason=(
-                    f"PowerShell requests one-shot workspace write access in "
-                    f"{workspace.relative(resolved)}: {justification or 'no justification provided'}"
-                ),
-            )
-        if requested == "danger-full-access":
-            justification = str(args.get("justification") or "").strip()
-            return PermissionDecision(
-                risk=RiskLevel.level_2,
-                allowed=False,
-                requires_approval=True,
-                reason=(
-                    "PowerShell requests one-shot unrestricted Windows execution. "
-                    "The command can read or write anywhere accessible to the current user: "
-                    f"{justification or 'no justification provided'}"
-                ),
-            )
-        return PermissionDecision(
-            risk=RiskLevel.level_0,
-            allowed=True,
-            reason="PowerShell runs with a Windows read-only restricted token.",
-        )
-
+        from code_agent.services.shell_policy import classify_shell
+        return classify_shell(workspace, args)
     if tool_name in READ_ONLY_TOOLS:
         path = args.get("path", ".")
 
@@ -176,6 +132,10 @@ def classify_file_operation(
         )
 
     normalized = rel.replace("\\", "/")
+    from code_agent.services.path_policy import is_protected
+    if is_protected(resolved, workspace.root):
+        return PermissionDecision(risk=RiskLevel.level_3, allowed=False,
+                                 reason=f'Protected path cannot be modified: {rel}')
     name = resolved.name.lower()
 
     if workspace.is_sensitive(resolved):

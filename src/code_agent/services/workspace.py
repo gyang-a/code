@@ -25,11 +25,21 @@ class Workspace:
         read_limit: int = DEFAULT_FILE_READ_LIMIT,
         read_max_lines: int = DEFAULT_FILE_READ_MAX_LINES,
         exclude_globs: tuple[str, ...] = DEFAULT_EXCLUDE_GLOBS,
+        shell_mode: str = 'workspace-write',
+        shell_approval_policy: str = 'on-risk',
+        shell_allowed_commands: tuple[str, ...] = (),
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.read_limit = read_limit
         self.read_max_lines = read_max_lines
         self.exclude_globs = exclude_globs
+        if shell_mode not in {'read-only', 'workspace-write'}:
+            raise WorkspaceError('Unsupported sandbox mode; unrestricted execution is disabled.')
+        if shell_approval_policy not in {'on-risk', 'untrusted', 'never'}:
+            raise WorkspaceError('Unsupported Shell approval policy.')
+        self.shell_mode = shell_mode
+        self.shell_approval_policy = shell_approval_policy
+        self.shell_allowed_commands = shell_allowed_commands
 
         if not self.root.exists():
             raise WorkspaceError(f"Project folder does not exist: {self.root}")
@@ -73,11 +83,14 @@ class Workspace:
         )
 
     def is_sensitive(self, path: str | Path) -> bool:
+        from code_agent.services.path_policy import is_secret
         resolved = self.resolve(path)
         name = resolved.name.lower()
         parts = {part.lower() for part in resolved.parts}
 
         return (
+            is_secret(resolved)
+            or
             name in SENSITIVE_FILE_NAMES
             or name.endswith(SENSITIVE_SUFFIXES)
             or ".ssh" in parts
@@ -202,6 +215,9 @@ class Workspace:
         overwrite: bool = True,
     ) -> Path:
         resolved = self.resolve(path)
+        from code_agent.services.path_policy import is_protected
+        if is_protected(resolved, self.root):
+            raise WorkspaceError('Refusing to write a protected path.')
 
         if self.is_excluded(resolved):
             raise WorkspaceError(f"Refusing to write excluded path: {self.relative(resolved)}")

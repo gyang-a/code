@@ -1,258 +1,90 @@
 from __future__ import annotations
-
 import hashlib
 import threading
-import time
-from pathlib import Path
-
+from collections import Counter
 from langchain_core.tools import tool
-
-from code_agent.models import SandboxMode
-from code_agent.services.trace import (
-    capture_current_workspace_write_snapshots,
-    record_current_shell_file_changes,
-)
-from code_agent.services.windows_sandbox import (
-    SandboxUnavailableError,
-    ShellExecutionSpec,
-    WindowsRestrictedTokenSandbox,
-    WindowsSandboxExecutor,
-)
+from code_agent.models import SandboxMode, RiskLevel
+from code_agent.services.shell_policy import classify_shell
+from code_agent.services.trace import capture_current_workspace_write_snapshots, record_current_shell_file_changes
+from code_agent.services.windows_sandbox import SandboxUnavailableError, ShellExecutionSpec, WindowsRestrictedTokenSandbox
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.schemas import ShellCommandInput
 
 
-class ShellDenialRegistry:
-    """Remember the exact command and next escalation allowed by a real denial."""
-
-    def __init__(self) -> None:
-        self._latest: tuple[str, frozenset[str], float] | None = None
-        self._lock = threading.Lock()
-
-    def remember(
-        self,
-        command: str,
-        workdir: Path,
-        permissions: str | set[str] | frozenset[str],
-    ) -> None:
-        allowed = (
-            frozenset({permissions})
-            if isinstance(permissions, str)
-            else frozenset(permissions)
-        )
-        with self._lock:
-            self._latest = (_fingerprint(command, workdir), allowed, time.monotonic())
-
-    def consume(self, command: str, workdir: Path, permission: str) -> bool:
-        fingerprint = _fingerprint(command, workdir)
-        with self._lock:
-            latest = self._latest
-            if latest is None:
-                return False
-            latest_fingerprint, allowed_permissions, created_at = latest
-            valid = (
-                latest_fingerprint == fingerprint
-                and permission in allowed_permissions
-                and time.monotonic() - created_at <= 300
-            )
-            if valid or time.monotonic() - created_at > 300:
-                self._latest = None
-            return valid
-
-    def eligible(self, command: str, workdir: Path, permission: str) -> bool:
-        fingerprint = _fingerprint(command, workdir)
-        with self._lock:
-            latest = self._latest
-            if latest is None:
-                return False
-            latest_fingerprint, allowed_permissions, created_at = latest
-            if time.monotonic() - created_at > 300:
-                self._latest = None
-                return False
-            return latest_fingerprint == fingerprint and permission in allowed_permissions
-
-
-def build_shell_command_tool(
-    workspace: Workspace,
-    *,
-    executor: WindowsSandboxExecutor | None = None,
-    denial_registry: ShellDenialRegistry | None = None,
-    default_timeout_ms: int = 10_000,
-    max_timeout_ms: int = 120_000,
-    output_limit: int = 12_000,
-):
+def build_shell_command_tool(workspace: Workspace, *, executor=None,
+        default_timeout_ms=10_000, max_timeout_ms=120_000, output_limit=12_000):
     sandbox = executor or WindowsRestrictedTokenSandbox(workspace.root)
-    registry = denial_registry or ShellDenialRegistry()
+    approvals = Counter()
+    lock = threading.Lock()
+
+    def fingerprint(args):
+        payload = repr((args.get('command'), str(workspace.resolve(args.get('workdir', '.'))),
+                        args.get('timeout_ms'), workspace.shell_mode,
+                        workspace.shell_approval_policy, workspace.shell_allowed_commands))
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def authorize(args):
+        result = classify_shell(workspace, args)
+        if result.requires_approval:
+            with lock:
+                approvals[fingerprint(args)] += 1
 
     @tool(args_schema=ShellCommandInput)
-    def shell_command(
-        command: str,
-        description: str,
-        workdir: str = ".",
-        timeout_ms: int | None = None,
-        sandbox_permissions: str | None = None,
-        justification: str | None = None,
-    ) -> str:
-        """Execute a PowerShell command (`pwsh -Command`) and return stdout/stderr.
+    def shell_command(command: str, description: str, workdir: str = '.',
+                      timeout_ms: int | None = None) -> str:
+        """Run PowerShell inside the host-selected restricted-token sandbox.
 
-        Every call starts a fresh pwsh process, so cwd, variables, and functions
-        do not persist between calls. Use `workdir` instead of `cd`. Use native
-        Windows paths and `$env:NAME` for environment variables. Results include
-        `[exit code: N]`; timeouts also include `[timed out]`. Long stdout/stderr
-        is truncated to its tail.
-
-        Read-only and workspace-write commands run under a Windows file sandbox
-        and PowerShell ConstrainedLanguage mode. Prefer cmdlets, properties, formatting, and
-        core types; Add-Type, COM, reflection, and non-core .NET static calls may
-        fail. Restricted processes cannot capture child-process output through
-        named-pipe stdio: Node.js spawn/exec with `stdio: 'pipe'` may fail with
-        `spawn EPERM`. After any real workspace-write denial, or a process-pipe
-        denial in read-only mode, retry the exact same command once with
-        `sandbox_permissions='danger-full-access'`. This requires separate user
-        approval and runs with the user's normal Windows file permissions so
-        external runtimes, caches, and pipe-based build tools can work. Never
-        request it speculatively or change the command.
-
-        Calls default to read-only. Attempt the command and inspect its sandbox
-        marker rather than predicting denial. If a real file-access denial occurs
-        and workspace writes would make it succeed, retry the exact same command
-        and workdir once with `sandbox_permissions='workspace-write'` and a
-        one-sentence justification. The retry triggers user approval and widens
-        only that execution. Never escalate speculatively or work around a
-        rejected escalation.
+        Known reads and host-authorized commands run directly. Deletions and
+        unknown scripts require approval; forbidden paths/actions are rejected.
+        Approval never grants full access. Each call starts a fresh process; use
+        workdir. Inspect exit code, timeout and denial markers.
         """
-        del description, justification
+        args = dict(command=command, workdir=workdir, timeout_ms=timeout_ms)
         try:
-            resolved_workdir = workspace.resolve(workdir)
-            if not resolved_workdir.exists():
-                return f"ERROR: Shell working directory does not exist: {workdir}"
-            if not resolved_workdir.is_dir():
-                return f"ERROR: Shell working directory is not a directory: {workdir}"
-
-            mode = {
-                SandboxMode.workspace_write.value: SandboxMode.workspace_write,
-                SandboxMode.danger_full_access.value: SandboxMode.danger_full_access,
-            }.get(sandbox_permissions, SandboxMode.read_only)
-            if mode != SandboxMode.read_only:
-                if not registry.consume(command, resolved_workdir, mode.value):
-                    return (
-                        f"REJECTED[level_2]: {mode.value} is only valid for the exact command "
-                        "after the corresponding real sandbox denial."
-                    )
-                capture_current_workspace_write_snapshots("shell_command")
-
-            requested_timeout = default_timeout_ms if timeout_ms is None else timeout_ms
-            effective_timeout = min(max(requested_timeout, 1), max_timeout_ms)
-            result = sandbox.run(
-                ShellExecutionSpec(
-                    command=command,
-                    workdir=resolved_workdir,
-                    timeout_ms=effective_timeout,
-                    mode=mode,
-                )
-            )
-            if mode != SandboxMode.read_only:
-                record_current_shell_file_changes()
-            if (
-                mode == SandboxMode.read_only
-                and result.denial_kind == "file-access"
-            ):
-                registry.remember(
-                    command,
-                    resolved_workdir,
-                    {
-                        SandboxMode.workspace_write.value,
-                        SandboxMode.danger_full_access.value,
-                    },
-                )
-            elif (
-                result.sandbox_denied
-                and mode == SandboxMode.workspace_write
-            ) or result.denial_kind == "process-pipe":
-                registry.remember(command, resolved_workdir, SandboxMode.danger_full_access.value)
-
-            return _render_result(result, output_limit=output_limit)
+            result = classify_shell(workspace, args)
+            if result.risk == RiskLevel.level_3:
+                return f'REJECTED[level_3]: {result.reason}'
+            if result.requires_approval:
+                key = fingerprint(args)
+                with lock:
+                    if not approvals[key]:
+                        return f'REJECTED[level_2]: Approval required. {result.reason}'
+                    approvals[key] -= 1
+            cwd = workspace.resolve(workdir)
+            if not cwd.is_dir():
+                return 'ERROR: Shell working directory does not exist.'
+            mode = SandboxMode(workspace.shell_mode)
+            if mode == SandboxMode.workspace_write:
+                capture_current_workspace_write_snapshots('shell_command')
+            try:
+                execution = sandbox.run(ShellExecutionSpec(command, cwd,
+                    min(max(timeout_ms or default_timeout_ms, 1), max_timeout_ms), mode))
+            finally:
+                if mode == SandboxMode.workspace_write:
+                    record_current_shell_file_changes()
+            return _render_result(execution, output_limit=output_limit)
         except WorkspaceError as exc:
-            return f"REJECTED[level_3]: {exc}"
+            return f'REJECTED[level_3]: {exc}'
         except SandboxUnavailableError as exc:
-            return f"ERROR: SANDBOX_UNAVAILABLE: {exc}"
+            return f'ERROR: SANDBOX_UNAVAILABLE: {exc}'
 
-    def approval_eligible(args: dict) -> bool:
-        permission = str(args.get("sandbox_permissions") or "")
-        command = str(args.get("command") or "")
-        workdir = str(args.get("workdir") or ".")
-        if permission not in {
-            SandboxMode.workspace_write.value,
-            SandboxMode.danger_full_access.value,
-        }:
-            return True
-        try:
-            resolved_workdir = workspace.resolve(workdir)
-        except WorkspaceError:
-            return False
-        return registry.eligible(command, resolved_workdir, permission)
-
-    # The approval middleware runs before the tool. Expose a read-only preflight
-    # so it does not ask the user to approve a request the registry must reject.
-    object.__setattr__(shell_command, "_approval_eligible", approval_eligible)
+    object.__setattr__(shell_command, '_authorize', authorize)
     return shell_command
 
 
-def _fingerprint(command: str, workdir: Path) -> str:
-    payload = f"{workdir.resolve()}\0{command}".encode("utf-8", errors="replace")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _render_result(result, *, output_limit: int) -> str:
-    lines = [
-        (
-            f"[sandbox: mode={result.mode.value} enforcement={result.enforcement} "
-            f"denied={'true' if result.sandbox_denied else 'false'}]"
-        )
-    ]
-    if result.sandbox_denied:
-        denial_label = (
-            "process pipe access denied"
-            if result.denial_kind == "process-pipe"
-            else "file access denied"
-        )
-        lines.append(f"[sandbox: {denial_label} under {result.mode.value} mode]")
-    if result.stdout:
-        lines.extend(["stdout:", _truncate_tail(result.stdout.rstrip(), output_limit)])
-    if result.stderr:
-        lines.extend(["stderr:", _truncate_tail(result.stderr.rstrip(), output_limit)])
+def _render_result(result, *, output_limit):
+    lines = [f'[sandbox: mode={result.mode.value} enforcement={result.enforcement} '
+             f'denied={str(result.sandbox_denied).lower()}]']
+    for label, value in [('stdout', result.stdout), ('stderr', result.stderr)]:
+        if value:
+            lines.extend([label + ':', _truncate_tail(value.rstrip(), output_limit)])
     if result.timed_out:
-        lines.append("[timed out]")
-    lines.append(f"[exit code: {result.exit_code if result.exit_code is not None else 'unknown'}]")
-    if (
-        result.sandbox_denied
-        and result.denial_kind == "file-access"
-        and result.mode == SandboxMode.read_only
-    ):
-        lines.append(
-            "The sandbox blocked file access. Retry this exact command with "
-            "sandbox_permissions='workspace-write' for workspace-local writes. For dependency/package "
-            "manager commands that require external runtimes or caches, request "
-            "sandbox_permissions='danger-full-access' directly. Either choice requires approval."
-        )
-    elif result.sandbox_denied and result.mode == SandboxMode.workspace_write:
-        lines.append(
-            "The workspace sandbox still blocked file or process access outside its boundary. "
-            "Retry this exact command once with sandbox_permissions='danger-full-access' and a "
-            "justification. That approval uses the current user's normal Windows permissions."
-        )
-    elif result.denial_kind == "process-pipe":
-        lines.append(
-            "The Windows restricted token blocked child-process pipe capture. Retry this exact "
-            "command once with sandbox_permissions='danger-full-access' and a justification. "
-            "That approval runs the command with normal Windows file permissions; do not change "
-            "the command or try an alias/wrapper."
-        )
-    return "\n".join(lines)
+        lines.append('[timed out]')
+    lines.append(f'[exit code: {result.exit_code if result.exit_code is not None else "unknown"}]')
+    if result.sandbox_denied:
+        lines.append('[possible access denial detected in output; full-access retry is disabled]')
+    return '\n'.join(lines)
 
 
-def _truncate_tail(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    omitted = len(text) - limit
-    return f"... truncated {omitted} leading characters ...\n{text[-limit:]}"
+def _truncate_tail(text, limit):
+    return text if len(text) <= limit else f'... truncated {len(text)-limit} leading characters ...\n{text[-limit:]}'

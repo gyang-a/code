@@ -48,6 +48,9 @@ class Session:
     context_compressions: int = 0
     last_context_tokens: int = 0
     model_usage: TokenUsage = field(default_factory=TokenUsage)
+    shell_mode: str = 'workspace-write'
+    shell_approval_policy: str = 'on-risk'
+    shell_allowed_commands: tuple[str, ...] = ()
 
     def reset(self) -> None:
         self.thread_id = str(uuid.uuid4())
@@ -654,9 +657,19 @@ def _prompt_approval_decisions(interrupt_value: Any) -> list[dict[str, Any]]:
 def main(
     workspace: str = typer.Argument(".", help="Workspace directory for the code agent."),
     model: str | None = typer.Option(None, "--model", "-m", help="Override the default model name."),
+    sandbox_mode: str = typer.Option('workspace-write', '--sandbox-mode', help='read-only or workspace-write; full access is disabled.'),
+    approval_policy: str = typer.Option('on-risk', '--approval-policy', help='on-risk, untrusted, or never.'),
+    allow_shell: list[str] | None = typer.Option(None, '--allow-shell', help='Trust an exact project command for this session; repeatable.'),
 ) -> None:
     """Start an interactive workspace-safe code agent."""
     session, env_path, loaded_env = _create_session(workspace, model=model)
+    try:
+        Workspace(session.workspace, shell_mode=sandbox_mode, shell_approval_policy=approval_policy)
+    except WorkspaceError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    session.shell_mode = sandbox_mode
+    session.shell_approval_policy = approval_policy
+    session.shell_allowed_commands = tuple(allow_shell or ())
     _run_interactive_session(session, env_path=env_path, loaded_env=loaded_env, resumed=False)
 
 
@@ -696,6 +709,8 @@ def _run_interactive_session(
     resumed: bool,
 ) -> None:
     print_banner(session.workspace, session.model)
+    console.print(f'[dim]Shell: {session.shell_mode}; approvals: {session.shell_approval_policy}; '
+                  f'host-authorized commands: {len(session.shell_allowed_commands)}[/dim]')
     console.print(f"[dim]{'Resumed' if resumed else 'Started'} thread: {session.thread_id}[/dim]")
     if loaded_env:
         console.print(f"[dim]Loaded environment variables from {env_path}[/dim]")
@@ -718,7 +733,7 @@ def _run_interactive_session(
 
                     graph = build_graph(
                         session.workspace,
-                        AgentConfig(model=session.model),
+                        AgentConfig(model=session.model, shell_mode=session.shell_mode, shell_approval_policy=session.shell_approval_policy, shell_allowed_commands=session.shell_allowed_commands),
                         checkpointer=checkpointer,
                     )
                 except Exception as exc:
@@ -774,7 +789,7 @@ def _run_interactive_session(
                     )
             except Exception as exc:
                 if _is_model_timeout_error(exc):
-                    agent_config = AgentConfig(model=session.model)
+                    agent_config = AgentConfig(model=session.model, shell_mode=session.shell_mode, shell_approval_policy=session.shell_approval_policy, shell_allowed_commands=session.shell_allowed_commands)
                     error_message = _model_timeout_message(exc, agent_config)
                     console.print(f"[red]{error_message}[/red]")
                 else:
@@ -920,7 +935,7 @@ def _review_trace_for_skills(session: Session, trace_payload: Mapping[str, Any])
 
     result = review_trace_for_skills(
         trace=trace_payload,
-        config=AgentConfig(model=session.model),
+        config=AgentConfig(model=session.model, shell_mode=session.shell_mode, shell_approval_policy=session.shell_approval_policy, shell_allowed_commands=session.shell_allowed_commands),
     )
     if result.status == "proposed":
         _prompt_skill_review_approval(result)

@@ -60,11 +60,10 @@ def build_turn_metadata(
         "- Use patch_file for normal edits; avoid full-file rewrites.",
         "- Use create_file only for genuinely new files.",
         "- Use git_status/git_diff to inspect changes.",
-        "- Use shell_command for Windows PowerShell commands; it defaults to read-only sandboxing.",
-        "- Inspect denied, timeout, and exit-code markers before reporting command results.",
-        "- After a real read-only denial, use workspace-write for local writes or direct danger-full-access for package managers needing external caches/runtimes.",
-        "- Each shell call is fresh; controlled modes use ConstrainedLanguage, while approved danger-full-access uses the normal Windows mode.",
-        "- Any workspace-write denial, or a read-only process-pipe denial, permits one exact danger-full-access retry with separate approval.",
+        f"- Shell sandbox: {workspace.shell_mode}; approval policy: {workspace.shell_approval_policy}.",
+        "- Known reads and explicitly host-authorized commands run directly; unknown commands require approval.",
+        "- Forbidden paths/actions are rejected; approval never grants full access.",
+        "- Each Shell call starts a fresh PowerShell process. Inspect exit code and timeout.",
         "",
         "Command policy:",
         *_format_command_policy(workspace),
@@ -140,8 +139,8 @@ def _format_command_policy(workspace: Workspace) -> list[str]:
 
     if policy is None:
         return [
-            "- command execution: Windows PowerShell in the read-only restricted-token sandbox",
-            "- workspace writes: exact denied-command retry with user approval",
+            f"- command execution: Windows PowerShell in {workspace.shell_mode} restricted-token sandbox",
+            f"- approval policy: {workspace.shell_approval_policy}; no full-access fallback",
         ]
 
     lines: list[str] = []

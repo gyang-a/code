@@ -82,28 +82,7 @@ class ShellCommandInput(BaseModel):
         ge=1,
         description="Optional timeout in milliseconds; the host applies a configured cap.",
     )
-    sandbox_permissions: Literal["workspace-write", "danger-full-access"] | None = Field(
-        default=None,
-        description=(
-            "Request a one-shot escalation after an exact real denial. A read-only file denial "
-            "permits workspace-write or direct danger-full-access; use direct full access for package "
-            "managers that need external runtimes/caches. A process-pipe or workspace-write denial "
-            "permits danger-full-access, which runs with "
-            "the user's normal Windows file permissions. Both require approval."
-        ),
-    )
-    justification: str | None = Field(
-        default=None,
-        description="One sentence explaining why this exact command needs the requested access.",
-    )
-
-    @model_validator(mode="after")
-    def validate_escalation_pair(self):
-        permission_set = self.sandbox_permissions is not None
-        justification_set = bool(self.justification and self.justification.strip())
-        if permission_set != justification_set:
-            raise ValueError("sandbox_permissions and a non-empty justification must be provided together")
-        return self
+    model_config = {"extra": "forbid"}
 
 
 class SkillsListInput(BaseModel):

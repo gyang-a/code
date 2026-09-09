@@ -20,11 +20,10 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("/workspace", SYSTEM_PROMPT)
         self.assertIn("current project folder", SYSTEM_PROMPT)
         self.assertIn("Use shell_command", SYSTEM_PROMPT)
-        self.assertIn("read-only restricted token", SYSTEM_PROMPT)
-        self.assertIn("exact same command and workdir", SYSTEM_PROMPT)
-        self.assertIn("process-pipe denial", SYSTEM_PROMPT)
-        self.assertIn("danger-full-access", SYSTEM_PROMPT)
-        self.assertIn("npm` versus `npm.cmd", SYSTEM_PROMPT)
+        self.assertIn("independently of approvals", SYSTEM_PROMPT)
+        self.assertIn("Never request full-access", SYSTEM_PROMPT)
+        self.assertNotIn("sandbox_permissions=", SYSTEM_PROMPT)
+
 
 
 if __name__ == "__main__":

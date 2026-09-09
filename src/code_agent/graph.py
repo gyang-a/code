@@ -5,7 +5,6 @@ from typing import Any
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
-    HumanInTheLoopMiddleware,
     ModelCallLimitMiddleware,
     ModelRequest,
     ModelResponse,
@@ -28,6 +27,7 @@ from code_agent.services.metadata import build_turn_metadata
 from code_agent.services.permissions import classify_tool_call
 from code_agent.services.skills import SkillStore, format_skill_index
 from code_agent.services.workspace import Workspace
+from code_agent.services.shell_approval import ShellApprovalMiddleware
 from code_agent.state import AgentState
 from code_agent.ui.console import console
 from code_agent.tools import (
@@ -89,6 +89,9 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
         read_limit=agent_config.file_read_limit,
         read_max_lines=agent_config.file_read_max_lines,
         exclude_globs=agent_config.exclude_globs,
+        shell_mode=agent_config.shell_mode,
+        shell_approval_policy=agent_config.shell_approval_policy,
+        shell_allowed_commands=agent_config.shell_allowed_commands,
     )
     tools = build_tools(
         workspace,
@@ -135,7 +138,8 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
             ),
             PerModelToolCallLimitMiddleware(agent_config.max_tool_calls_per_turn),
             TodoListMiddleware(),
-            HumanInTheLoopMiddleware(
+            ShellApprovalMiddleware(
+                tools=tools,
                 interrupt_on=_approval_interrupt_config(workspace, tools),
                 description_prefix="Tool execution requires approval",
             ),
@@ -211,14 +215,11 @@ class RuntimeMetadataMiddleware(AgentMiddleware):
             "- Compare the current user request with the available global skills before taking action.\n"
             "- If a listed skill is relevant, call skill_view for that skill before inspecting or editing project files.\n"
             "- If no listed skill is relevant, continue without calling skill_view.\n\n"
-            "Command execution: use shell_command. It runs PowerShell under the Windows read-only "
-            "restricted-token sandbox by default. After a real read-only file denial, use workspace-write "
-            "for local writes, but use direct danger-full-access for package managers such as npm install or uv add "
-            "that need external runtimes/caches. Retry the exact command with a justification. Never request "
-            "workspace-write speculatively or work around a rejected escalation. Each call is a fresh "
-            "PowerShell process; controlled modes use ConstrainedLanguage and workdir replaces cd. Any workspace-write "
-            "denial, or a read-only process-pipe denial such as spawn EPERM, permits one exact retry with sandbox_permissions='danger-full-access' "
-            "and separate approval. Never request it speculatively or change the command spelling.\n"
+            "Command execution: use shell_command in the host-selected restricted-token sandbox. "
+            "Known reads and host-authorized commands run directly; risky/unknown commands require approval. "
+            "Forbidden paths/actions are rejected. Approval never changes sandbox permissions. "
+            "Do not retry denials with full access or alternate command spellings. "
+            "Each call is a fresh PowerShell process; use workdir.\n"
             f"Tool call budget: the host executes at most {self.max_tool_calls_per_turn} tool calls from each model response. "
             "If more work remains, continue it in a later response."
         )
@@ -249,9 +250,6 @@ def _approval_required(workspace: Workspace, tool=None):
             str(tool_call.get("name") or ""),
             args,
         )
-        eligibility_check = getattr(tool, "_approval_eligible", None)
-        if decision.requires_approval and callable(eligibility_check):
-            return bool(eligibility_check(args))
         return bool(decision.requires_approval)
 
     return when

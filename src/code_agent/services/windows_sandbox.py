@@ -95,6 +95,8 @@ class WindowsRestrictedTokenSandbox:
             ) from exc
 
     def run(self, spec: ShellExecutionSpec) -> ShellExecutionResult:
+        if spec.mode not in (SandboxMode.read_only, SandboxMode.workspace_write):
+            raise SandboxUnavailableError('Unrestricted execution is disabled by host policy.')
         if spec.workdir != self.workspace_root and self.workspace_root not in spec.workdir.parents:
             raise SandboxUnavailableError("Shell working directory escapes the workspace.")
 
@@ -144,11 +146,8 @@ class WindowsRestrictedTokenSandbox:
             win32api.GetCurrentProcess(),
             win32con.TOKEN_ALL_ACCESS,
         )
-        if mode == SandboxMode.danger_full_access:
-            # This mode is reachable only through the host approval gate after
-            # a real process-pipe denial. It deliberately uses the caller's
-            # normal token so Node/esbuild can create child-process stdio pipes.
-            return source
+        if mode not in (SandboxMode.read_only, SandboxMode.workspace_write):
+            raise SandboxUnavailableError('Unrestricted execution is disabled.')
 
         groups = win32security.GetTokenInformation(source, win32security.TokenGroups)
         logon_sids = [sid for sid, attrs in groups if attrs & win32con.SE_GROUP_LOGON_ID]
@@ -159,18 +158,22 @@ class WindowsRestrictedTokenSandbox:
         read_sid = _capability_sid("workspace-read", self.workspace_root)
         with self._acl_lock:
             _grant_directory_access(self.workspace_root, read_sid, writable=False)
-        restricting_sids = [(logon_sids[0], 0), (everyone, 0), (read_sid, 0)]
+        guard_sid = _capability_sid('protected-paths', self.workspace_root)
+        restricting_sids = [(logon_sids[0], 0), (everyone, 0), (read_sid, 0), (guard_sid, 0)]
+        temp_sid = _capability_sid('temp', temp_dir)
+        with self._acl_lock:
+            _grant_directory_access(temp_dir, temp_sid, writable=True)
+            _protect_workspace(self.workspace_root, guard_sid)
+        restricting_sids.append((temp_sid, 0))
 
         if mode == SandboxMode.workspace_write:
             workspace_sid = _capability_sid("workspace-write", self.workspace_root)
-            temp_sid = _capability_sid("temp", temp_dir)
             with self._acl_lock:
                 _grant_directory_access(self.workspace_root, workspace_sid, writable=True)
-                _grant_directory_access(temp_dir, temp_sid, writable=True)
-            restricting_sids.extend([(workspace_sid, 0), (temp_sid, 0)])
+            restricting_sids.append((workspace_sid, 0))
 
-        # DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED. pywin32 does
-        # not publish names for the latter two flags on all supported builds.
+        # Preserve WRITE_RESTRICTED for native runtime compatibility. Literal
+        # secret reads are rejected by preflight, but this is NOT read isolation.
         flags = 0x1 | 0x4 | 0x8
         return win32security.CreateRestrictedToken(
             source,
@@ -204,7 +207,8 @@ class WindowsRestrictedTokenSandbox:
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                spec.command,
+                "Set-Location -LiteralPath '" + str(spec.workdir).replace("'", "''")
+                + "' -ErrorAction Stop; " + spec.command,
             ]
         )
         environment = _sanitized_environment(temp_dir)
@@ -319,11 +323,7 @@ def _grant_directory_access(path: Path, sid, *, writable: bool) -> None:
     sid_text = win32security.ConvertSidToStringSid(sid)
     access_mask = ntsecuritycon.FILE_GENERIC_READ | ntsecuritycon.FILE_GENERIC_EXECUTE
     if writable:
-        access_mask |= (
-            ntsecuritycon.FILE_GENERIC_WRITE
-            | ntsecuritycon.DELETE
-            | ntsecuritycon.FILE_DELETE_CHILD
-        )
+        access_mask |= ntsecuritycon.FILE_GENERIC_WRITE | ntsecuritycon.DELETE
     for index in range(dacl.GetAceCount()):
         _header, existing_mask, existing_sid = dacl.GetAce(index)
         if (
@@ -355,7 +355,67 @@ def _sanitized_environment(temp_dir: Path) -> dict[str, str]:
     environment["TEMP"] = str(temp_dir)
     environment["TMP"] = str(temp_dir)
     environment["CODE_AGENT_SANDBOX"] = "windows-restricted-token"
+    environment['npm_config_cache'] = str(temp_dir / 'npm-cache')
+    environment['UV_CACHE_DIR'] = str(temp_dir / 'uv-cache')
+    environment['PIP_CACHE_DIR'] = str(temp_dir / 'pip-cache')
     return environment
+
+
+def _deny_access(path: Path, sid, mask: int, *, inherit: bool = True) -> None:
+    """Add an explicit deny for the sandbox-only SID, leaving host access intact."""
+    import win32security
+    descriptor = win32security.GetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION)
+    old = descriptor.GetSecurityDescriptorDacl()
+    if old is None:
+        raise SandboxUnavailableError(f'Refusing NULL DACL: {path}')
+    sid_text = win32security.ConvertSidToStringSid(sid)
+    flags = (win32security.OBJECT_INHERIT_ACE | win32security.CONTAINER_INHERIT_ACE) if inherit and path.is_dir() else 0
+    for i in range(old.GetAceCount()):
+        header, existing_mask, existing_sid = old.GetAce(i)
+        if (header[0] == win32security.ACCESS_DENIED_ACE_TYPE and existing_mask == mask
+                and win32security.ConvertSidToStringSid(existing_sid) == sid_text):
+            return
+    acl = win32security.ACL()
+    acl.AddAccessDeniedAceEx(win32security.ACL_REVISION_DS, flags, mask, sid)
+    for i in range(old.GetAceCount()):
+        header, old_mask, old_sid = old.GetAce(i)
+        if header[0] == win32security.ACCESS_ALLOWED_ACE_TYPE:
+            acl.AddAccessAllowedAceEx(win32security.ACL_REVISION_DS, header[1], old_mask, old_sid)
+        elif header[0] == win32security.ACCESS_DENIED_ACE_TYPE:
+            acl.AddAccessDeniedAceEx(win32security.ACL_REVISION_DS, header[1], old_mask, old_sid)
+        else:
+            raise SandboxUnavailableError(f'Unsupported ACE type; refusing to rewrite ACL: {path}')
+    win32security.SetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION, None, None, acl, None)
+
+
+def _protect_workspace(root: Path, sid) -> None:
+    import ntsecuritycon as rights
+    from code_agent.services.path_policy import PROTECTED_NAMES, is_secret
+    write_mask = (rights.FILE_WRITE_DATA | rights.FILE_APPEND_DATA | rights.FILE_WRITE_EA
+                  | rights.FILE_WRITE_ATTRIBUTES | rights.DELETE | rights.FILE_DELETE_CHILD
+                  | rights.WRITE_DAC | rights.WRITE_OWNER)
+    # Parent DELETE_CHILD can override a child's DELETE denial. Deny it on
+    # all directories; ordinary deletions use DELETE on the target instead.
+    for current, dirs, files in os.walk(root, followlinks=False):
+        directory = Path(current)
+        _deny_access(directory, sid, rights.FILE_DELETE_CHILD | rights.WRITE_DAC | rights.WRITE_OWNER,
+                     inherit=False)
+        for name in list(dirs) + files:
+            path = directory / name
+            if path.is_symlink() or path.resolve() != path.absolute():
+                # Do not change ACLs on objects reached through a link/junction.
+                raise SandboxUnavailableError(f'Linked paths require a separate sandbox backend: {path}')
+            if name.lower() in PROTECTED_NAMES:
+                _deny_access(path, sid, write_mask)
+                if name in dirs:
+                    dirs.remove(name)
+            elif is_secret(path):
+                _deny_access(path, sid, rights.FILE_ALL_ACCESS)
+                if name in dirs:
+                    dirs.remove(name)
+    _deny_access(root, sid, rights.DELETE, inherit=False)
 
 
 def _read_output(path: Path) -> str:

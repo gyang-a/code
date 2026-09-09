@@ -126,17 +126,33 @@ Code Agent 可以在所有工作区之间复用技能库。默认情况下，技
 
 模型可以调用受限的文件系统、搜索、Git、技能和 Windows PowerShell 工具。`read_file` 默认只返回有限范围的文本；智能体需要指定后续的 `start_line` 才能继续读取。
 
-`shell_command` 使用 Windows `WRITE_RESTRICTED` 令牌运行 PowerShell。默认的 `read-only` 模式不允许写入工作区。发生实际文件访问拒绝后，普通的工作区内命令可以通过 `sandbox_permissions="workspace-write"` 申请重试。`npm install`、`uv add` 等依赖或包管理命令则可以直接申请 `danger-full-access`，因为它们的运行时和缓存通常位于工作区之外。这两类针对原命令的重试都会暂停并等待用户批准。沙箱初始化失败时会直接拒绝执行，绝不回退到不受限制的子进程。
+`shell_command` 采用三种执行决策：明确允许的操作直接执行；删除、安装、任意脚本等需要审批；已识别的越界、敏感路径和禁止操作直接拒绝。PowerShell AST 解析器会检查复合命令，而不是只匹配第一个命令名。解析失败时拒绝执行。
 
-用于授予能力的访问控制条目（ACE）采用确定性方式生成，并作为不具备独立授权作用的缓存保留在工作区中；只有进程的受限令牌携带匹配的安全标识符（SID）时，才能使用这些权限。每条命令的临时目录及其对应能力会在执行结束后移除。
+沙箱模式与审批策略彼此独立，默认 `workspace-write + on-risk`。不再要求先以只读模式执行失败，也不再提供 `danger-full-access` 重试。审批只允许本次具体操作，不改变沙箱权限；批准后修改命令仍会重新检查硬性禁止规则。
 
-每次 Shell 调用都会启动新的 `pwsh -Command` 进程，因此 PowerShell 状态不会保留；调用方应使用 `workdir` 指定目录，而非依赖 `cd`。在受支持的 Windows 后端中，`read-only` 和 `workspace-write` 模式使用受限语言模式（ConstrainedLanguage），应优先使用 cmdlet 和核心类型。经批准的 `danger-full-access` 模式使用调用者正常的 PowerShell 语言模式。
+```powershell
+# 默认：已识别读取直接运行，其余未授权命令审批
+code-agent .
 
-通过命名管道标准输入输出捕获子进程输出时，可能出现 `spawn EPERM`，这会被报告为 `process-pipe` 拒绝。只读模式下出现 `process-pipe` 拒绝，或命令在 `workspace-write` 模式下仍被拒绝（例如需要访问外部 npm 运行时或缓存）时，该原命令可以单独申请用户批准，使用 `danger-full-access` 重试一次。
+# 明确信任当前项目的两个开发入口，避免反复审批
+code-agent . --allow-shell 'npm run build' --allow-shell 'npm test'
 
-这一最终模式使用调用者正常的 Windows 令牌，使 Node、Vite、esbuild 可以创建基于管道的子进程，同时也意味着命令可以访问当前用户有权访问的所有资源。除前述依赖或包管理命令可直接申请的情况外，不能预先尝试使用该模式，也不能通过更换别名、包装程序或命令写法来重试。
+# 工作区只读；需要审批的命令直接拒绝
+code-agent . --sandbox-mode read-only --approval-policy never
 
-Windows ACL 后端只提供部分约束：允许 Everyone 写入的 Windows 对象和 NTFS 硬链接别名是平台层面的限制；读取权限、网络访问和进程可见性不在这个写入沙箱的约束范围内。命令启动前会移除疑似包含敏感凭据的环境变量。
+# 不采用项目命令豁免，只让已识别的读取操作自动执行
+code-agent . --approval-policy untrusted
+```
+
+`--allow-shell` 精确匹配整条命令，仅在本次 CLI 会话中有效；明确删除命令、动态脚本和禁止路径不会因此放行。它表示用户信任项目代码，**不表示已证明构建/测试脚本安全**。不要把未知项目的执行入口加入允许列表。模式和规则由宿主配置，不从 Agent 可写的项目规则文件加载。
+
+文件工具拒绝修改 `.git`、`.agents`、`.codex`、`.code-agent`。Shell 静态检查保守地拒绝显式访问这些路径，以及 `.env`、私钥等敏感路径。Windows 后端在执行前给已存在的受保护路径添加针对沙箱 SID 的拒绝写入/删除 ACE，并限制父目录删除子项的权限；普通宿主进程不持有这个 SID。发现链接或 junction 时拒绝初始化，避免修改链接目标的 ACL。能力 ACL 会保留在工作区中。
+
+每次调用启动新的 PowerShell 进程，显式定位到 `workdir`。临时目录在两种模式下均可写，npm、uv、pip 缓存重定向到本次临时目录；执行结束后清理。超时和 Job Object 继续负责清理子进程。沙箱初始化失败时拒绝执行，不回退到无约束进程。输出中的权限关键词只用于诊断，不再赋予提权重试资格。
+
+**现有 Windows 后端仍是部分写入隔离。** 它保留 `WRITE_RESTRICTED` 令牌：动态脚本的读取行为和网络访问没有完整的操作系统隔离；Windows 对 Everyone 等主体开放写入的对象以及硬链接仍有平台限制。敏感路径读取的静态检查不能看透任意 Python/Node 脚本；未来在执行中创建的敏感路径也不是通配符 ACL 保护。批准任意脚本不能被理解为安全证明。`read-only` 指工作区写约束，允许本次私有临时目录写入。真正的完整读取/网络隔离需要专用低权限用户或独立隔离后端。
+
+验证：`python -m pytest`；Windows 原生访问测试使用临时工作区及模拟普通项目的 ACL，覆盖普通写入、保护路径写入/删除、工作区外写入、只读写入拒绝。若测试运行器自身被外层沙箱限制，需从正常 Windows 用户终端运行原生测试。
 
 ## 常用命令
 

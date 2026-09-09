@@ -1,386 +1,134 @@
-from __future__ import annotations
-
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
 from pydantic import ValidationError
-
 from code_agent.models import SandboxMode
-from code_agent.services.windows_sandbox import (
-    ShellExecutionResult,
-    _classify_denial,
-    _looks_like_denial,
-    _sanitized_environment,
-)
+from code_agent.services.shell_policy import classify_shell
+from code_agent.services.shell_approval import ShellApprovalMiddleware
+from code_agent.services.windows_sandbox import ShellExecutionResult, _sanitized_environment
 from code_agent.services.workspace import Workspace
 from code_agent.tools.schemas import ShellCommandInput
-from code_agent.tools.shell import ShellDenialRegistry, build_shell_command_tool
+from code_agent.tools.shell import build_shell_command_tool
 
 
 class FakeSandbox:
-    def __init__(self, results: list[ShellExecutionResult]) -> None:
-        self.results = list(results)
+    def __init__(self):
         self.calls = []
 
     def run(self, spec):
         self.calls.append(spec)
-        return self.results.pop(0)
+        return ShellExecutionResult(0, 'ok', '', False, False, spec.mode)
 
 
-class ShellToolTests(unittest.TestCase):
-    def test_defaults_to_read_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox([_result(mode=SandboxMode.read_only, stdout="ok")])
-            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
+class ShellTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.workspace = Workspace(self.tmp.name)
+        self.executor = FakeSandbox()
+        self.tool = build_shell_command_tool(self.workspace, executor=self.executor)
 
-            output = tool.invoke({"command": "Get-ChildItem", "description": "List files"})
+    def args(self, command):
+        return {'command': command, 'description': 'Test command'}
 
-        self.assertEqual(sandbox.calls[0].mode, SandboxMode.read_only)
-        self.assertIn("mode=read-only", output)
-        self.assertIn("stdout:\nok", output)
+    def test_reads_run_in_default_workspace_write_without_approval(self):
+        self.tool.invoke(self.args('Get-Content README.md'))
+        self.assertEqual(self.executor.calls[0].mode, SandboxMode.workspace_write)
 
-    def test_workspace_write_requires_a_prior_exact_denial(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox([_result(mode=SandboxMode.workspace_write)])
-            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
+    def test_approval_does_not_change_read_only_mode(self):
+        self.workspace.shell_mode = 'read-only'
+        args = self.args('python task.py')
+        self.tool._authorize(args)
+        self.tool.invoke(args)
+        self.assertEqual(self.executor.calls[0].mode, SandboxMode.read_only)
 
-            output = tool.invoke(
-                {
-                    "command": "pytest",
-                    "description": "Run tests",
-                    "sandbox_permissions": "workspace-write",
-                    "justification": "Tests create cache files.",
-                }
-            )
+    def test_unknown_script_requires_exact_one_shot_host_approval(self):
+        args = self.args('python task.py')
+        self.assertIn('Approval required', self.tool.invoke(args))
+        self.tool._authorize(args)
+        self.assertIn('Approval required', self.tool.invoke(self.args('python other.py')))
+        self.assertIn('exit code: 0', self.tool.invoke(args))
+        self.assertIn('Approval required', self.tool.invoke(args))
+        self.assertEqual(len(self.executor.calls), 1)
 
-        self.assertTrue(output.startswith("REJECTED[level_2]"))
-        self.assertEqual(sandbox.calls, [])
+    def test_host_allowed_build_does_not_need_failure_or_approval(self):
+        self.workspace.shell_allowed_commands = ('npm run build',)
+        self.tool.invoke(self.args('npm run build'))
+        self.assertEqual(len(self.executor.calls), 1)
 
-    def test_denied_command_can_be_retried_once_with_workspace_write(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox(
-                [
-                    _result(mode=SandboxMode.read_only, denied=True, stderr="Access is denied"),
-                    _result(mode=SandboxMode.workspace_write, stdout="passed"),
-                ]
-            )
-            registry = ShellDenialRegistry()
-            tool = build_shell_command_tool(
-                Workspace(tmp),
-                executor=sandbox,
-                denial_registry=registry,
-            )
-            base = {"command": "pytest", "description": "Run tests", "workdir": "."}
+    def test_untrusted_and_never_are_independent_of_sandbox(self):
+        self.workspace.shell_allowed_commands = ('npm run build',)
+        self.workspace.shell_approval_policy = 'untrusted'
+        self.assertTrue(classify_shell(self.workspace, self.args('npm run build')).requires_approval)
+        self.workspace.shell_approval_policy = 'never'
+        self.assertEqual(classify_shell(self.workspace, self.args('npm run build')).risk.value, 'level_3')
 
-            denied = tool.invoke(base)
-            approved = tool.invoke(
-                {
-                    **base,
-                    "sandbox_permissions": "workspace-write",
-                    "justification": "Tests create cache files.",
-                }
-            )
-            second_retry = tool.invoke(
-                {
-                    **base,
-                    "sandbox_permissions": "workspace-write",
-                    "justification": "Try the same write again.",
-                }
-            )
+    def test_denied_targets_never_receive_approval(self):
+        for command in ['Remove-Item . -Recurse -Force', 'Get-Content ../secret.txt',
+                        'Set-Content .git/config x', 'Get-Content .env',
+                        'Remove-Item .codex -Recurse', 'iex "echo hello"',
+                        'Get-Content README.md; Remove-Item . -Recurse']:
+            with self.subTest(command=command):
+                args = self.args(command)
+                self.tool._authorize(args)
+                self.assertIn('REJECTED[level_3]', self.tool.invoke(args))
+        self.assertEqual(self.executor.calls, [])
 
-        self.assertIn("denied=true", denied)
-        self.assertIn("mode=workspace-write", approved)
-        self.assertTrue(second_retry.startswith("REJECTED[level_2]"))
-        self.assertEqual([call.mode for call in sandbox.calls], [SandboxMode.read_only, SandboxMode.workspace_write])
+    def test_compound_delete_and_dynamic_commands_require_approval(self):
+        for command in ['Get-Content README.md; Remove-Item src/old -Recurse',
+                        '$p = "src/old"; Remove-Item $p', 'Write-Output hi > output.txt']:
+            with self.subTest(command=command):
+                self.assertTrue(classify_shell(self.workspace, self.args(command)).requires_approval)
 
-    def test_changed_command_does_not_match_denial(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox(
-                [_result(mode=SandboxMode.read_only, denied=True, stderr="Access is denied")]
-            )
-            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
-            tool.invoke({"command": "pytest", "description": "Run tests"})
-
-            output = tool.invoke(
-                {
-                    "command": "Remove-Item important.txt",
-                    "description": "Delete file",
-                    "sandbox_permissions": "workspace-write",
-                    "justification": "This command needs to delete a file.",
-                }
-            )
-
-        self.assertTrue(output.startswith("REJECTED[level_2]"))
-        self.assertEqual(len(sandbox.calls), 1)
-
-    def test_workdir_cannot_escape_workspace(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox([])
-            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
-
-            output = tool.invoke(
-                {"command": "Get-ChildItem", "description": "List parent", "workdir": ".."}
-            )
-
-        self.assertTrue(output.startswith("REJECTED[level_3]"))
-        self.assertEqual(sandbox.calls, [])
-
-    def test_escalation_fields_must_be_paired(self) -> None:
+    def test_legacy_escalation_fields_are_rejected(self):
         with self.assertRaises(ValidationError):
-            ShellCommandInput(
-                command="pytest",
-                description="Run tests",
-                sandbox_permissions="workspace-write",
-            )
+            ShellCommandInput(**self.args('pytest'), sandbox_permissions='danger-full-access')
 
-    def test_shell_timeout_is_capped_by_host(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox([_result(mode=SandboxMode.read_only)])
-            tool = build_shell_command_tool(
-                Workspace(tmp),
-                executor=sandbox,
-                max_timeout_ms=5_000,
-            )
+    def test_edited_approval_cannot_bypass_deny(self):
+        middleware = ShellApprovalMiddleware(tools=[self.tool], interrupt_on={'shell_command': True})
+        original = dict(name='shell_command', args=self.args('python task.py'), id='test')
+        revised, _ = middleware._process_decision(
+            {'type': 'edit', 'edited_action': {'name': 'shell_command', 'args': self.args('Remove-Item . -Recurse')}},
+            original, {'allowed_decisions': ['approve', 'edit']})
+        self.assertIn('REJECTED[level_3]', self.tool.invoke(revised['args']))
+        self.assertEqual(self.executor.calls, [])
 
-            tool.invoke(
-                {
-                    "command": "Start-Sleep -Seconds 10",
-                    "description": "Wait briefly",
-                    "timeout_ms": 60_000,
-                }
-            )
+    def test_timeout_cap(self):
+        tool = build_shell_command_tool(self.workspace, executor=self.executor, max_timeout_ms=100)
+        tool.invoke({**self.args('Get-Content README.md'), 'timeout_ms': 5000})
+        self.assertEqual(self.executor.calls[0].timeout_ms, 100)
 
-        self.assertEqual(sandbox.calls[0].timeout_ms, 5_000)
+    def test_environment_filters_secrets_and_redirects_caches(self):
+        with patch.dict('os.environ', {'DEEPSEEK_API_KEY': 'secret', 'SAFE_SETTING': 'visible'}, clear=True):
+            env = _sanitized_environment(Path(self.tmp.name))
+        self.assertNotIn('DEEPSEEK_API_KEY', env)
+        self.assertEqual(env['SAFE_SETTING'], 'visible')
+        self.assertTrue(env['UV_CACHE_DIR'].startswith(self.tmp.name))
 
-    def test_sensitive_environment_variables_are_removed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {
-                "DEEPSEEK_API_KEY": "secret",
-                "SERVICE_ACCESS_TOKEN": "secret",
-                "SAFE_SETTING": "visible",
-            },
-            clear=True,
-        ):
-            environment = _sanitized_environment(Path(tmp))
+    def test_real_graph_interrupt_resume_binds_approval(self):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langgraph.checkpoint.memory import InMemorySaver
+        from langgraph.types import Command
+        from code_agent.graph import _approval_interrupt_config
 
-        self.assertNotIn("DEEPSEEK_API_KEY", environment)
-        self.assertNotIn("SERVICE_ACCESS_TOKEN", environment)
-        self.assertEqual(environment["SAFE_SETTING"], "visible")
+        class Model(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
 
-    def test_stdout_eperm_is_classified_as_sandbox_denial(self) -> None:
-        self.assertTrue(
-            _looks_like_denial(
-                "Could not write tsconfig.tsbuildinfo: EPERM: operation not permitted",
-                "",
-            )
-        )
-        self.assertEqual(
-            _classify_denial(
-                "Could not write tsconfig.tsbuildinfo: EPERM: operation not permitted",
-                "",
-            ),
-            "file-access",
-        )
-
-    def test_stderr_spawn_eperm_is_classified_as_sandbox_denial(self) -> None:
-        self.assertTrue(_looks_like_denial("", "Error: spawn EPERM"))
-        self.assertEqual(_classify_denial("", "Error: spawn EPERM"), "process-pipe")
-
-    def test_normal_nonzero_error_is_not_classified_as_sandbox_denial(self) -> None:
-        self.assertFalse(_looks_like_denial("", "TypeScript error TS2322"))
-
-    def test_process_pipe_denial_allows_only_exact_danger_full_access_retry(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox(
-                [
-                    ShellExecutionResult(
-                        exit_code=1,
-                        stdout="",
-                        stderr="Error: spawn EPERM",
-                        timed_out=False,
-                        sandbox_denied=True,
-                        mode=SandboxMode.read_only,
-                        denial_kind="process-pipe",
-                    ),
-                    _result(mode=SandboxMode.danger_full_access, stdout="built"),
-                ]
-            )
-            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
-            base = {"command": "node build.js", "description": "Run build"}
-
-            denied = tool.invoke(base)
-            retry = tool.invoke(
-                {
-                    **base,
-                    "sandbox_permissions": "workspace-write",
-                    "justification": "Retry the build with workspace writes.",
-                }
-            )
-            approved = tool.invoke(
-                {
-                    **base,
-                    "sandbox_permissions": "danger-full-access",
-                    "justification": "Vite requires pipe-based child processes.",
-                }
-            )
-
-        self.assertIn("process pipe access denied", denied)
-        self.assertIn("sandbox_permissions='danger-full-access'", denied)
-        self.assertTrue(retry.startswith("REJECTED[level_2]"))
-        self.assertIn("mode=danger-full-access", approved)
-        self.assertEqual(len(sandbox.calls), 2)
-
-    def test_workspace_file_denial_allows_exact_danger_full_access_retry(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox(
-                [
-                    _result(
-                        mode=SandboxMode.read_only,
-                        denied=True,
-                        stderr="EPERM writing node_modules",
-                    ),
-                    _result(
-                        mode=SandboxMode.workspace_write,
-                        denied=True,
-                        stderr="Access is denied: D:\\NVMnodejs\\nodejs\\node.exe",
-                    ),
-                    _result(mode=SandboxMode.danger_full_access, stdout="installed"),
-                ]
-            )
-            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
-            base = {"command": "npm install", "description": "Install dependencies"}
-            approval_eligible = getattr(tool, "_approval_eligible")
-
-            self.assertFalse(
-                approval_eligible({**base, "sandbox_permissions": "workspace-write"})
-            )
-            read_only = tool.invoke(base)
-            self.assertTrue(
-                approval_eligible({**base, "sandbox_permissions": "workspace-write"})
-            )
-            self.assertFalse(
-                approval_eligible(
-                    {
-                        **base,
-                        "command": "npm install --cache .npm-cache",
-                        "sandbox_permissions": "workspace-write",
-                    }
-                )
-            )
-            workspace_write = tool.invoke(
-                {
-                    **base,
-                    "sandbox_permissions": "workspace-write",
-                    "justification": "npm writes node_modules.",
-                }
-            )
-            self.assertTrue(
-                approval_eligible({**base, "sandbox_permissions": "danger-full-access"})
-            )
-            danger = tool.invoke(
-                {
-                    **base,
-                    "sandbox_permissions": "danger-full-access",
-                    "justification": "npm needs its external runtime and cache.",
-                }
-            )
-
-        self.assertIn("mode=read-only", read_only)
-        self.assertIn("mode=workspace-write", workspace_write)
-        self.assertIn("sandbox_permissions='danger-full-access'", workspace_write)
-        self.assertIn("mode=danger-full-access", danger)
-        self.assertIn("stdout:\ninstalled", danger)
-        self.assertEqual(
-            [call.mode for call in sandbox.calls],
-            [
-                SandboxMode.read_only,
-                SandboxMode.workspace_write,
-                SandboxMode.danger_full_access,
-            ],
-        )
-
-    def test_read_only_file_denial_allows_direct_danger_for_package_manager(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox(
-                [
-                    _result(
-                        mode=SandboxMode.read_only,
-                        denied=True,
-                        stderr="EPERM accessing external package cache",
-                    ),
-                    _result(mode=SandboxMode.danger_full_access, stdout="resolved"),
-                ]
-            )
-            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
-            base = {"command": "uv add requests", "description": "Add dependency"}
-
-            denied = tool.invoke(base)
-            approved = tool.invoke(
-                {
-                    **base,
-                    "sandbox_permissions": "danger-full-access",
-                    "justification": "uv needs its external runtime and cache.",
-                }
-            )
-
-        self.assertIn("danger-full-access", denied)
-        self.assertIn("mode=danger-full-access", approved)
-        self.assertEqual(
-            [call.mode for call in sandbox.calls],
-            [SandboxMode.read_only, SandboxMode.danger_full_access],
-        )
-
-    def test_danger_full_access_cannot_be_requested_speculatively(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = FakeSandbox([])
-            tool = build_shell_command_tool(Workspace(tmp), executor=sandbox)
-
-            output = tool.invoke(
-                {
-                    "command": "npm run build",
-                    "description": "Build project",
-                    "sandbox_permissions": "danger-full-access",
-                    "justification": "Build might need child processes.",
-                }
-            )
-
-        self.assertTrue(output.startswith("REJECTED[level_2]"))
-        self.assertEqual(sandbox.calls, [])
-
-    def test_tool_description_documents_supported_windows_behavior(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            tool = build_shell_command_tool(
-                Workspace(tmp),
-                executor=FakeSandbox([]),
-            )
-
-        self.assertIn("fresh pwsh process", tool.description)
-        self.assertIn("ConstrainedLanguage", tool.description)
-        self.assertIn("named-pipe stdio", tool.description)
-        self.assertIn("exact same command", tool.description)
-        self.assertIn("danger-full-access", tool.description)
-
-
-def _result(
-    *,
-    mode: SandboxMode,
-    stdout: str = "",
-    stderr: str = "",
-    denied: bool = False,
-) -> ShellExecutionResult:
-    return ShellExecutionResult(
-        exit_code=1 if denied else 0,
-        stdout=stdout,
-        stderr=stderr,
-        timed_out=False,
-        sandbox_denied=denied,
-        mode=mode,
-        denial_kind="file-access" if denied else None,
-    )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        model = Model(responses=[AIMessage(content='', tool_calls=[
+            {'name': 'shell_command', 'args': self.args('python task.py'), 'id': 'call-1'}]),
+            AIMessage(content='done')])
+        middleware = ShellApprovalMiddleware(tools=[self.tool],
+            interrupt_on=_approval_interrupt_config(self.workspace, [self.tool]))
+        agent = create_agent(model, tools=[self.tool], middleware=[middleware], checkpointer=InMemorySaver())
+        config = {'configurable': {'thread_id': 'shell-approval-test'}}
+        pending = agent.invoke({'messages': [HumanMessage(content='Run task')]}, config)
+        self.assertTrue(pending.get('__interrupt__'))
+        self.assertEqual(self.executor.calls, [])
+        finished = agent.invoke(Command(resume={'decisions': [{'type': 'approve'}]}), config)
+        self.assertEqual(len(self.executor.calls), 1)
+        self.assertEqual(self.executor.calls[0].mode, SandboxMode.workspace_write)
+        self.assertEqual(finished['messages'][-1].content, 'done')
