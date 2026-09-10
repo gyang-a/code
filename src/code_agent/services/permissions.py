@@ -62,6 +62,9 @@ def classify_tool_call(
     if tool_name == "shell_command":
         from code_agent.services.shell_policy import classify_shell
         return classify_shell(workspace, args)
+    if tool_name in {"read_context_history", "search_context_history"}:
+        return PermissionDecision(risk=RiskLevel.level_0, allowed=True,
+                                  reason="Read-only, current-conversation archive access.")
     if tool_name in READ_ONLY_TOOLS:
         path = args.get("path", ".")
 

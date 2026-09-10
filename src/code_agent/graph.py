@@ -8,7 +8,6 @@ from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ModelRequest,
     ModelResponse,
-    SummarizationMiddleware,
     TodoListMiddleware,
     ToolCallLimitMiddleware,
 )
@@ -17,6 +16,7 @@ from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from code_agent.config import AgentConfig
+from code_agent.context_middleware import ContextManagementMiddleware, ConversationSummary
 from code_agent.middleware import (
     ModelRetryMiddleware,
     PerModelToolCallLimitMiddleware,
@@ -110,6 +110,12 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
     if agent_config.api_key:
         llm_kwargs["api_key"] = agent_config.api_key
     llm = init_chat_model(agent_config.model, model_provider="deepseek", **llm_kwargs)
+    summary_llm = init_chat_model(
+        agent_config.model, model_provider="deepseek", **llm_kwargs,
+        max_tokens=agent_config.context_summary_token_limit,
+        extra_body={"thinking": {"type": "disabled"}},
+    ).with_structured_output(ConversationSummary, method="json_mode")
+    context_manager = ContextManagementMiddleware(workspace_path, agent_config, summary_llm)
     fallback_llm = None
     if agent_config.fallback_model and agent_config.fallback_model != agent_config.model:
         fallback_llm = init_chat_model(
@@ -137,6 +143,7 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
                 on_fallback=_print_model_fallback,
             ),
             PerModelToolCallLimitMiddleware(agent_config.max_tool_calls_per_turn),
+            context_manager,
             TodoListMiddleware(),
             ShellApprovalMiddleware(
                 tools=tools,
@@ -144,14 +151,6 @@ def build_graph(workspace_path: str, config: AgentConfig | None = None, checkpoi
                 description_prefix="Tool execution requires approval",
             ),
             ToolErrorMiddleware(),
-            SummarizationMiddleware(
-                llm,
-                trigger=[
-                    ("messages", agent_config.context_message_limit),
-                    ("tokens", agent_config.context_token_limit),
-                ],
-                keep=("messages", agent_config.context_keep_recent),
-            ),
             ToolCallLimitMiddleware(
                 run_limit=agent_config.max_total_tool_calls_per_run,
                 exit_behavior="continue",

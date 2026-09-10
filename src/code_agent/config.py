@@ -41,6 +41,8 @@ DEFAULT_EXCLUDE_GLOBS = (
     ".code-agent/traces.sqlite3-*",
     ".code-agent/traces/**",
     ".code-agent/.gitignore",
+    ".code-agent/context.sqlite3",
+    ".code-agent/context.sqlite3-*",
 )
 
 SENSITIVE_FILE_NAMES = {
@@ -119,4 +121,20 @@ class AgentConfig:
     context_message_limit: int = DEFAULT_CONTEXT_MESSAGE_LIMIT
     context_token_limit: int = DEFAULT_CONTEXT_TOKEN_LIMIT
     context_keep_recent: int = DEFAULT_CONTEXT_KEEP_RECENT
+    # context_token_limit is the usable INPUT budget (output reserve excluded).
+    context_trigger_ratio: float = 0.8
+    # Relative to input size immediately before this compression, not model window.
+    context_mask_target_ratio: float = 0.5
+    context_keep_recent_turns: int = 3
+    context_tool_token_limit: int = 4000
+    context_summary_input_tokens: int = 12000
+    context_summary_token_limit: int = 3000
     exclude_globs: tuple[str, ...] = field(default_factory=lambda: DEFAULT_EXCLUDE_GLOBS)
+
+    def __post_init__(self):
+        if not 0 < self.context_mask_target_ratio < self.context_trigger_ratio <= 1:
+            raise ValueError('Context ratios must satisfy 0 < target < trigger <= 1.')
+        if self.context_keep_recent_turns < 1 or self.context_tool_token_limit < 512:
+            raise ValueError('Keep at least one recent turn; tool budget must be at least 512 tokens.')
+        if min(self.context_token_limit, self.context_summary_input_tokens, self.context_summary_token_limit) < 512:
+            raise ValueError('Context and summary budgets must be at least 512 tokens.')

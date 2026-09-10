@@ -9,6 +9,7 @@ from code_agent.services.trace import capture_current_workspace_write_snapshots,
 from code_agent.services.windows_sandbox import SandboxUnavailableError, ShellExecutionSpec, WindowsRestrictedTokenSandbox
 from code_agent.services.workspace import Workspace, WorkspaceError
 from code_agent.tools.schemas import ShellCommandInput
+from code_agent.services.summarizer import raw_tool_output
 
 
 def build_shell_command_tool(workspace: Workspace, *, executor=None,
@@ -87,4 +88,4 @@ def _render_result(result, *, output_limit):
 
 
 def _truncate_tail(text, limit):
-    return text if len(text) <= limit else f'... truncated {len(text)-limit} leading characters ...\n{text[-limit:]}'
+    return text if raw_tool_output.get() or len(text) <= limit else f'... truncated {len(text)-limit} leading characters ...\n{text[-limit:]}'
