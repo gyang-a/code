@@ -12,8 +12,9 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-.sqlite3
-.code-agent/checkpoints.sqlite3*
+# Local runtime databases and SQLite companion files (keep reusable skills tracked).
+.code-agent/*.sqlite3*
 .code-agent/pending/
 .code-agent/traces/
+.code-agent/undo/
 .understand-anything
